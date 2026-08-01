@@ -1,11 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
-import 'package:url_launcher/url_launcher.dart';
 
-import '../../../core/config/support_config.dart';
 import '../../../core/models/recent_provider.dart';
 import '../../../core/theme/mt_colors.dart';
 import '../../../core/theme/mt_text_styles.dart';
+import '../../../core/utils/whatsapp_support.dart';
 import '../../../core/widgets/initials_avatar.dart';
 import '../../../core/widgets/mt_button.dart';
 import '../../../core/widgets/mt_empty_state.dart';
@@ -28,34 +27,11 @@ class ProviderProfileScreen extends StatelessWidget {
   }
 
   Future<void> _contactSupport(BuildContext context) async {
-    final digits = SupportConfig.supportPhone.replaceAll(RegExp(r'[^0-9]'), '');
     final name = provider?.name ?? 'a provider';
-    final text = Uri.encodeComponent(
-      'Hi Taafi, I would like to know more about $name.',
+    await launchWhatsAppSupport(
+      context,
+      message: 'Hi Taafi, I would like to know more about $name.',
     );
-    final uri = Uri.parse('https://wa.me/$digits?text=$text');
-    try {
-      final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
-      if (!ok && context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'Could not open WhatsApp. Reach us at ${SupportConfig.supportPhoneDisplay}',
-            ),
-          ),
-        );
-      }
-    } catch (_) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-              'Could not open WhatsApp. Reach us at ${SupportConfig.supportPhoneDisplay}',
-            ),
-          ),
-        );
-      }
-    }
   }
 
   @override

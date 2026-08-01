@@ -1,10 +1,7 @@
 import 'dart:async';
-import 'dart:ui' as ui;
 
-import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/api/home_section_providers.dart';
@@ -12,90 +9,33 @@ import '../../../core/api/patient_home_repository.dart';
 import '../../../core/api/promo_banner_providers.dart';
 import '../../../core/api/service_catalog_providers.dart';
 import '../../../core/config/support_config.dart';
-import '../../../core/models/assigned_nurse.dart';
-import '../../../core/models/patient_active_request.dart';
-import '../../../core/models/patient_request_status.dart';
 import '../../../core/models/promo_banner.dart';
 import '../../../core/models/service_catalog_item.dart';
+import '../../../core/models/service_category.dart';
 import '../../../core/theme/mt_text_styles.dart';
 import '../../../core/widgets/async_value_view.dart';
 import '../../../core/widgets/frosted_surface.dart';
 import '../../../core/widgets/initials_avatar.dart';
-import '../../../core/widgets/mt_empty_state.dart';
 import '../../../core/widgets/mt_skeleton.dart';
 import '../../auth/auth_provider.dart';
-import '../../../core/widgets/mt_search_field.dart';
 import '../../notifications/widgets/notification_bell.dart';
-import '../../chat/presentation/conversation_inbox_button.dart';
 import '../navigation/banner_action_dispatcher.dart';
 import '../navigation/patient_nav_provider.dart';
 import '../new_request/new_request_notifier.dart';
+import 'booking_tracking_screen.dart';
+import 'widgets/care_card_primitives.dart';
+import 'widgets/care_service_card.dart';
+import 'widgets/care_services_empty_state.dart';
 import 'widgets/dynamic_home_sections.dart';
+import 'widgets/ongoing_care_card.dart';
 import 'widgets/patient_home_palette.dart';
+import 'widgets/staggered_animated_card.dart';
 
-final _patientMoneyFmt = NumberFormat('#,###', 'en_US');
-String _patientMoney(num n) => '৳${_patientMoneyFmt.format(n.round())}';
-
-/// Health-service category filters shown as the chip rail directly under the
-/// header. `'All'` is the sentinel that disables filtering; every other label
-/// is matched (case-insensitively) against a service's `category` / `title`.
-const List<String> _patientCategories = [
-  'All',
-  'Post-op',
-  'Nursing',
-  'Vitals',
-  'Elderly',
-  'Lab',
-];
-
-/// Currently-selected category chip. Defaults to `'All'` (show everything).
-/// Watched by both the chip rail (to highlight the active pill) and the
-/// services grid (to filter its items).
-final selectedCategoryProvider = StateProvider<String>((ref) => 'All');
-
-/// Free-text search query from the neon search bar. Watched by the Care
-/// Services rail to filter its cards live alongside the category chip.
-final searchQueryProvider = StateProvider<String>((ref) => '');
-
-/// Extra keywords that should also match a chip beyond the chip label itself,
-/// so the free-form backend `category` strings map onto our fixed filter set.
-const Map<String, List<String>> _categoryAliases = {
-  'Post-op': ['post-op', 'post op', 'postop', 'post-surgery', 'surgery', 'wound'],
-  'Nursing': ['nursing', 'nurse'],
-  'Vitals': ['vitals', 'vital', 'checkup', 'check-up', 'monitoring'],
-  'Elderly': ['elderly', 'senior', 'geriatric', 'aged'],
-  'Lab': ['lab', 'laboratory', 'test', 'sample', 'diagnostic'],
-};
-
-/// True when [item] belongs to the [category] chip. `'All'` always matches.
-bool _serviceMatchesCategory(ServiceCatalogItem item, String category) {
-  if (category == 'All') return true;
-  final haystack = '${item.category} ${item.title}'.toLowerCase();
-  final needles = _categoryAliases[category] ?? [category.toLowerCase()];
-  return needles.any(haystack.contains);
-}
-
-/// Picks a service-card header icon from the item's category / title keywords,
-/// falling back to a generic medical-bag glyph. Uses the same tolerant
-/// lowercase matching as [_serviceMatchesCategory].
-IconData _serviceIcon(ServiceCatalogItem item) {
-  final h = '${item.category} ${item.title}'.toLowerCase();
-  bool has(List<String> ks) => ks.any(h.contains);
-  if (has(['wound', 'dressing', 'surgery', 'post-op', 'post op', 'postop'])) {
-    return Icons.healing_rounded;
-  }
-  if (has(['vitals', 'vital', 'monitor', 'checkup', 'check-up', 'check up'])) {
-    return Icons.monitor_heart_rounded;
-  }
-  if (has(['lab', 'laboratory', 'sample', 'diagnostic', 'test'])) {
-    return Icons.science_rounded;
-  }
-  if (has(['elderly', 'senior', 'geriatric', 'aged'])) {
-    return Icons.elderly_rounded;
-  }
-  if (has(['nursing', 'nurse'])) return Icons.vaccines_rounded;
-  return Icons.medical_services_rounded;
-}
+/// Currently-selected category chip, one of [kPatientCategoryChips]. Defaults
+/// to `'All'` (show everything). Watched by both the chip rail (to highlight
+/// the active pill) and the services grid (to filter its items).
+final selectedCategoryProvider =
+    StateProvider<String>((ref) => kServiceCategoryAll);
 
 /// Tab 0 of the patient shell — the dashboard. Renders the greeting +
 /// alert bell header, "Your care timeline" card (or the orange hero
@@ -113,7 +53,10 @@ class PatientHomeScreen extends ConsumerWidget {
   Future<void> _onRefresh(WidgetRef ref) async {
     await Future.wait([
       ref.read(patientHomeFeedProvider.notifier).refresh(),
-      Future.sync(() => ref.refresh(activeServicesProvider.future)),
+      // Must go through the repository — `ref.refresh(activeServicesProvider)`
+      // only re-subscribes to the existing repository and replays its cached
+      // error without issuing a request. See [refreshServiceCatalog].
+      refreshServiceCatalog(ref),
       ref.read(homeSectionRepositoryProvider).refresh(),
     ]);
   }
@@ -159,14 +102,6 @@ class PatientHomeScreen extends ConsumerWidget {
                 ),
                 children: [
                   const _CategoryChipsRail(),
-                  const SizedBox(height: 14),
-                  _Inset(
-                    child: MtSearchField(
-                      hintText: 'Search services, doctors...',
-                      onChanged: (q) =>
-                          ref.read(searchQueryProvider.notifier).state = q,
-                    ),
-                  ),
                   const SizedBox(height: 16),
                   const _Inset(child: _PromoCarousel()),
                   const SizedBox(height: 24),
@@ -189,7 +124,13 @@ class PatientHomeScreen extends ConsumerWidget {
                             ),
                           ),
                           const SizedBox(height: 10),
-                          _ActiveRequestCard(request: activeRequest),
+                          OngoingCareCard(
+                            request: activeRequest,
+                            onTrackDetails: () => openBookingTracking(
+                              context,
+                              activeRequest,
+                            ),
+                          ),
                         ],
                       ),
                     ),
@@ -353,8 +294,6 @@ class _HeaderRow extends ConsumerWidget {
           ),
         ),
         const SizedBox(width: 8),
-        const ConversationInboxButton(),
-        const SizedBox(width: 8),
         const NotificationBell(),
         const SizedBox(width: 10),
         _ProfileAvatarButton(name: user?.name),
@@ -503,10 +442,10 @@ class _CategoryChipsRail extends ConsumerWidget {
       child: ListView.separated(
         scrollDirection: Axis.horizontal,
         padding: const EdgeInsets.symmetric(horizontal: 16),
-        itemCount: _patientCategories.length,
+        itemCount: kPatientCategoryChips.length,
         separatorBuilder: (_, _) => const SizedBox(width: 8),
         itemBuilder: (context, i) {
-          final label = _patientCategories[i];
+          final label = kPatientCategoryChips[i];
           final active = label == selected;
           return _CategoryChip(
             label: label,
@@ -798,473 +737,6 @@ class _PromoDots extends StatelessWidget {
   }
 }
 
-/// "YOUR CARE TIMELINE" card. Premium white container with two rows:
-///   Row 1 — cream-tinted provider avatar + name/service-description
-///           column + light-blue "ON THE WAY" status pill.
-///   Row 2 — warm peach band with the brand-orange transit icon, a
-///           bold "Arriving in X min" headline, and a brand-orange
-///           "Track live →" action that animates the user straight to
-///           the Tracking tab on the patient shell.
-class _ActiveRequestCard extends ConsumerWidget {
-  final PatientActiveRequest request;
-  const _ActiveRequestCard({required this.request});
-
-  // --- Status → pill metadata --------------------------------------------
-
-  String get _statusPillLabel {
-    switch (request.status) {
-      case PatientRequestStatus.pendingReview:
-        return 'IN REVIEW';
-      case PatientRequestStatus.accepted:
-        return 'ASSIGNED';
-      case PatientRequestStatus.enRoute:
-        return 'ON THE WAY';
-      case PatientRequestStatus.arrived:
-        return 'ARRIVED';
-      case PatientRequestStatus.inService:
-        return 'IN SERVICE';
-      case PatientRequestStatus.completed:
-        return 'COMPLETED';
-      case PatientRequestStatus.rejected:
-        return 'REJECTED';
-      case PatientRequestStatus.cancelled:
-        return 'CANCELLED';
-    }
-  }
-
-  /// Two-tone pill colors tuned for the dark canvas — a translucent tinted
-  /// background with a bright foreground. In-flight rows (on-the-way) read
-  /// indigo; terminal / pending rows borrow dark status tints.
-  ({Color background, Color foreground}) _statusPillColorsFor(HomeDark hd) {
-    switch (request.status) {
-      case PatientRequestStatus.pendingReview:
-        return (
-          background: hd.violet.withValues(alpha: 0.18),
-          foreground: hd.violetBright,
-        );
-      case PatientRequestStatus.completed:
-      case PatientRequestStatus.inService:
-        return (
-          background: hd.positiveBg,
-          foreground: hd.positive,
-        );
-      case PatientRequestStatus.rejected:
-      case PatientRequestStatus.cancelled:
-        return (
-          background: hd.dangerBg,
-          foreground: hd.danger,
-        );
-      case PatientRequestStatus.accepted:
-      case PatientRequestStatus.enRoute:
-      case PatientRequestStatus.arrived:
-        return (
-          background: hd.indigo.withValues(alpha: 0.20),
-          foreground: hd.violetBright,
-        );
-    }
-  }
-
-  /// Live-context headline shown on the warm bottom strip. ETA-aware
-  /// when the backend supplied one; otherwise a status-derived fallback
-  /// so the strip is never empty.
-  String get _liveContextHeadline {
-    final eta = request.etaMinutes;
-    if (eta != null && eta > 0) return 'Arriving in $eta min';
-    switch (request.status) {
-      case PatientRequestStatus.pendingReview:
-        return 'Confirming your booking…';
-      case PatientRequestStatus.accepted:
-        return 'Doctor confirmed';
-      case PatientRequestStatus.enRoute:
-        return 'Doctor is on the way';
-      case PatientRequestStatus.arrived:
-        return 'Doctor arrived';
-      case PatientRequestStatus.inService:
-        return 'Visit in progress';
-      case PatientRequestStatus.completed:
-        return 'Visit completed';
-      case PatientRequestStatus.rejected:
-        return 'Request rejected';
-      case PatientRequestStatus.cancelled:
-        return 'Request cancelled';
-    }
-  }
-
-  /// Service-description subtitle ("Post-op wound care · with nurse")
-  /// stitched from the service title plus any helper / nurse presence
-  /// the backend reports on the active row.
-  String get _providerSubtitle {
-    final parts = <String>[];
-    if (request.serviceTitleEn.isNotEmpty) parts.add(request.serviceTitleEn);
-    if (parts.isEmpty && request.providerSpecialization != null) {
-      parts.add(request.providerSpecialization!);
-    }
-    if (request.assignedNurse != null) {
-      parts.add('with nurse');
-    }
-    return parts.join(' · ');
-  }
-
-  void _onTrackLive(WidgetRef ref) {
-    switch (request.status.homeRouteTarget) {
-      case HomeRouteTarget.underReview:
-        ref.goToActivities(sub: PatientActivitiesTab.underReview);
-        break;
-      case HomeRouteTarget.tracking:
-        ref.goToActivities(sub: PatientActivitiesTab.tracking);
-        break;
-      case HomeRouteTarget.none:
-        // Terminal rows don't have a deep-link target — degrade to
-        // the under-review sub-tab so the user can read the summary.
-        ref.goToActivities(sub: PatientActivitiesTab.underReview);
-        break;
-    }
-  }
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final hd = HomeDark.of(context);
-    final pill = _statusPillColorsFor(hd);
-    final providerName = request.providerName ?? 'Awaiting doctor assignment';
-    final showLiveBar = request.status != PatientRequestStatus.cancelled &&
-        request.status != PatientRequestStatus.rejected;
-
-    return Container(
-      decoration: BoxDecoration(
-        color: hd.surface,
-        borderRadius: BorderRadius.circular(16),
-        border: Border.all(color: hd.glow),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.35),
-            blurRadius: 16,
-            offset: const Offset(0, 8),
-          ),
-        ],
-      ),
-      clipBehavior: Clip.antiAlias,
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          // ---- Row 1: provider info + status pill ----------------------
-          Padding(
-            padding: const EdgeInsets.fromLTRB(14, 14, 14, 14),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                _CreamProviderAvatar(
-                  name: providerName,
-                  photoUrl: request.providerAvatarUrl,
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        providerName,
-                        style: MtTextStyles.labelLg.copyWith(
-                          color: hd.title,
-                          fontWeight: FontWeight.w700,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                      if (_providerSubtitle.isNotEmpty) ...[
-                        const SizedBox(height: 2),
-                        Text(
-                          _providerSubtitle,
-                          style: MtTextStyles.bodySm.copyWith(
-                            color: hd.body,
-                          ),
-                          maxLines: 2,
-                          overflow: TextOverflow.ellipsis,
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-                const SizedBox(width: 10),
-                _StatusPill(
-                  label: _statusPillLabel,
-                  background: pill.background,
-                  foreground: pill.foreground,
-                ),
-              ],
-            ),
-          ),
-
-          // ---- Row 1b: paired nurse sub-row ---------------------------
-          // Renders directly under the doctor row when a nurse is
-          // assigned, so the patient sees their whole care team at a
-          // glance without leaving the home tab.
-          if (request.assignedNurse != null)
-            _AssignedNurseRow(nurse: request.assignedNurse!),
-
-          // ---- Row 2: warm peach context bar ---------------------------
-          if (showLiveBar)
-            _LiveContextBar(
-              headline: _liveContextHeadline,
-              onTrackLive: () => _onTrackLive(ref),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Compact "Nurse Aliya · ICU Care" row rendered under the doctor row
-/// inside the YOUR CARE TIMELINE card. Same cream/brown avatar as the
-/// doctor row + a small "Nurse" badge so the role is visually distinct.
-class _AssignedNurseRow extends StatelessWidget {
-  final AssignedNurse nurse;
-  const _AssignedNurseRow({required this.nurse});
-
-  @override
-  Widget build(BuildContext context) {
-    final hd = HomeDark.of(context);
-    final subtitle = nurse.specialty.isNotEmpty
-        ? nurse.specialty
-        : (nurse.yearsExperience > 0
-            ? '${nurse.yearsExperience}y experience'
-            : 'Nursing care');
-    return Container(
-      decoration: BoxDecoration(
-        border: Border(top: BorderSide(color: hd.border)),
-      ),
-      padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
-      child: Row(
-        crossAxisAlignment: CrossAxisAlignment.center,
-        children: [
-          _CreamProviderAvatar(
-            name: nurse.fullName,
-            photoUrl: nurse.profilePicture,
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Flexible(
-                      child: Text(
-                        'Nurse ${nurse.fullName}',
-                        style: MtTextStyles.labelMd.copyWith(
-                          color: hd.title,
-                          fontWeight: FontWeight.w700,
-                        ),
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    ),
-                    if (nurse.isVerifiedNurse) ...[
-                      const SizedBox(width: 6),
-                      Icon(Icons.verified,
-                          size: 14, color: hd.violetBright),
-                    ],
-                  ],
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  subtitle,
-                  style: MtTextStyles.bodySm.copyWith(color: hd.body),
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
-            ),
-          ),
-          const SizedBox(width: 10),
-          const _NurseRoleChip(),
-        ],
-      ),
-    );
-  }
-}
-
-/// Small pill that says "NURSE" — reused on the active card sub-row
-/// and on the recent providers list to flag nurse rows distinctly.
-class _NurseRoleChip extends StatelessWidget {
-  const _NurseRoleChip();
-
-  @override
-  Widget build(BuildContext context) {
-    final hd = HomeDark.of(context);
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-      decoration: BoxDecoration(
-        color: hd.violet.withValues(alpha: 0.18),
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Text(
-        'NURSE',
-        style: MtTextStyles.labelSm.copyWith(
-          color: hd.violetBright,
-          fontSize: 9.5,
-          fontWeight: FontWeight.w700,
-          letterSpacing: 0.8,
-        ),
-      ),
-    );
-  }
-}
-
-/// Dark violet-tinted circle with bright-violet initials. Falls back to a
-/// network avatar when the backend has a photo for the assigned doctor.
-class _CreamProviderAvatar extends StatelessWidget {
-  static const double _size = 44;
-
-  final String name;
-  final String? photoUrl;
-  const _CreamProviderAvatar({required this.name, this.photoUrl});
-
-  @override
-  Widget build(BuildContext context) {
-    final hd = HomeDark.of(context);
-    final cream = hd.surfaceHi;
-    final brown = hd.violetBright;
-    final cleaned = name.replaceFirst(RegExp(r'^[Dd]r\.?\s+'), '');
-    final src = photoUrl;
-    if (src != null && src.isNotEmpty) {
-      return ClipOval(
-        child: Image.network(
-          src,
-          width: _size,
-          height: _size,
-          fit: BoxFit.cover,
-          errorBuilder: (_, _, _) => InitialsAvatar(
-            name: cleaned,
-            size: _size,
-            backgroundColor: cream,
-            textColor: brown,
-          ),
-        ),
-      );
-    }
-    return InitialsAvatar(
-      name: cleaned,
-      size: _size,
-      backgroundColor: cream,
-      textColor: brown,
-    );
-  }
-}
-
-/// Pill-shaped chip: small leading dot + bold uppercase label. Both
-/// inherit the same foreground color so a missing status mapping never
-/// produces a half-styled chip.
-class _StatusPill extends StatelessWidget {
-  final String label;
-  final Color background;
-  final Color foreground;
-  const _StatusPill({
-    required this.label,
-    required this.background,
-    required this.foreground,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
-      decoration: BoxDecoration(
-        color: background,
-        borderRadius: BorderRadius.circular(999),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Container(
-            width: 6,
-            height: 6,
-            decoration: BoxDecoration(
-              color: foreground,
-              shape: BoxShape.circle,
-            ),
-          ),
-          const SizedBox(width: 6),
-          Text(
-            label,
-            style: MtTextStyles.labelSm.copyWith(
-              color: foreground,
-              fontSize: 10.5,
-              fontWeight: FontWeight.w700,
-              letterSpacing: 0.6,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// Raised violet-tinted strip with the transit icon + bold ETA headline +
-/// "Track live →" CTA. Tapping the trailing action deep-links to the
-/// tracking tab via [_ActiveRequestCard._onTrackLive].
-class _LiveContextBar extends StatelessWidget {
-  final String headline;
-  final VoidCallback onTrackLive;
-
-  const _LiveContextBar({required this.headline, required this.onTrackLive});
-
-  @override
-  Widget build(BuildContext context) {
-    final hd = HomeDark.of(context);
-    return Container(
-      decoration: BoxDecoration(
-        color: hd.surfaceHi,
-        border: Border(top: BorderSide(color: hd.border)),
-      ),
-      padding: const EdgeInsets.fromLTRB(14, 12, 8, 12),
-      child: Row(
-        children: [
-          Icon(
-            Icons.directions_car_outlined,
-            size: 18,
-            color: hd.violetBright,
-          ),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              headline,
-              style: MtTextStyles.labelMd.copyWith(
-                color: hd.title,
-                fontWeight: FontWeight.w700,
-              ),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-          ),
-          TextButton(
-            onPressed: onTrackLive,
-            style: TextButton.styleFrom(
-              foregroundColor: hd.violetBright,
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-              minimumSize: const Size(0, 32),
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-            ),
-            child: Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  'Track live',
-                  style: MtTextStyles.labelMd.copyWith(
-                    color: hd.violetBright,
-                    fontWeight: FontWeight.w700,
-                  ),
-                ),
-                const SizedBox(width: 4),
-                Icon(Icons.arrow_forward,
-                    size: 16, color: hd.violetBright),
-              ],
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
 
 class _ActiveRequestSkeleton extends StatelessWidget {
   const _ActiveRequestSkeleton();
@@ -1305,65 +777,48 @@ class _ActiveRequestSkeleton extends StatelessWidget {
 class _ServicesGrid extends ConsumerWidget {
   const _ServicesGrid();
 
-  static const double _railHeight = 190;
   static const double _wideBreakpoint = 700;
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final async = ref.watch(activeServicesProvider);
     final category = ref.watch(selectedCategoryProvider);
-    final query = ref.watch(searchQueryProvider).trim().toLowerCase();
     final bool wide = MediaQuery.sizeOf(context).width >= _wideBreakpoint;
 
     return AsyncValueView<List<ServiceCatalogItem>>(
       value: async,
-      onRetry: () => ref.refresh(activeServicesProvider),
+      onRetry: () => refreshServiceCatalog(ref),
       // The skeleton is a horizontal rail, so it needs a bounded height in
       // both modes; the data branch bounds only the carousel, letting the
       // grid grow to as many rows as it needs.
       loadingBuilder: (_) => const SizedBox(
-        height: _railHeight,
+        height: kCareServiceCardRailHeight,
         child: _ServicesGridSkeleton(),
       ),
       // Never treat the raw list as empty here — an empty *filtered* result
       // is handled inside dataBuilder so the "no matches" copy can name the
-      // active category chip / search term.
+      // active category chip.
       isEmpty: (list) => false,
       emptyBuilder: (_) => const SizedBox.shrink(),
       dataBuilder: (_, items) {
         final filtered = [
           for (final item in items)
-            if (_serviceMatchesCategory(item, category) &&
-                (query.isEmpty ||
-                    '${item.title} ${item.category} ${item.description}'
-                        .toLowerCase()
-                        .contains(query)))
-              item,
+            if (serviceMatchesCategoryChip(item, category)) item,
         ];
         if (filtered.isEmpty) {
-          final bool searching = query.isNotEmpty;
           return _Inset(
-            child: MtEmptyState(
-              icon: searching
-                  ? Icons.search_off_rounded
-                  : Icons.medical_services_outlined,
-              title: searching
-                  ? 'No matches for “$query”'
-                  : category == 'All'
-                      ? 'No services available yet'
-                      : 'No $category services yet',
-              subtitle: searching
-                  ? 'Try a different search or category.'
-                  : category == 'All'
-                      ? 'Check back soon — new services are added regularly.'
-                      : 'Try another category or check back soon.',
+            child: CareServicesEmptyState(
+              category: category,
+              onShowAll: () => ref
+                  .read(selectedCategoryProvider.notifier)
+                  .state = kServiceCategoryAll,
             ),
           );
         }
         return wide
             ? _Inset(child: _ServicesFluidGrid(items: filtered))
             : SizedBox(
-                height: _railHeight,
+                height: kCareServiceCardRailHeight,
                 child: _ServicesCarousel(items: filtered),
               );
       },
@@ -1391,12 +846,14 @@ class _ServicesFluidGrid extends StatelessWidget {
         crossAxisCount: cols,
         mainAxisSpacing: 12,
         crossAxisSpacing: 12,
-        // Keeps tile proportions close to the mobile rail's ~226×190 (2 cols)
-        // and the 150×190 skeleton card (3 cols) inside the 600px column.
-        childAspectRatio: cols == 3 ? 0.95 : 1.30,
+        // Lands the tiles on the same 260px height the mobile rail uses.
+        childAspectRatio: careServiceGridAspectRatio(cols),
       ),
       itemCount: items.length,
-      itemBuilder: (_, i) => _AnimatedCareServiceCard(item: items[i]),
+      itemBuilder: (_, i) => StaggeredAnimatedCard(
+        index: i,
+        child: _HomeServiceCard(item: items[i]),
+      ),
     );
   }
 }
@@ -1407,10 +864,6 @@ class _ServicesFluidGrid extends StatelessWidget {
 /// edge. Only the loaded, non-empty list reaches here; the async / filter /
 /// empty-state branches stay in [_ServicesGrid].
 class _ServicesCarousel extends StatelessWidget {
-  /// Fixed card footprint on the rail (the rail's 190 px height comes from
-  /// the parent SizedBox in [_ServicesGrid]).
-  static const double _railCardWidth = 220;
-
   final List<ServiceCatalogItem> items;
   const _ServicesCarousel({required this.items});
 
@@ -1423,370 +876,54 @@ class _ServicesCarousel extends StatelessWidget {
       itemCount: items.length,
       separatorBuilder: (_, _) => const SizedBox(width: 12),
       itemBuilder: (_, i) => SizedBox(
-        width: _railCardWidth,
-        child: _AnimatedCareServiceCard(item: items[i]),
+        width: kCareServiceCardWidth,
+        child: StaggeredAnimatedCard(
+          index: i,
+          child: _HomeServiceCard(item: items[i]),
+        ),
       ),
     );
   }
 }
 
-/// Animated two-tone Care Services card. A tactile press shrinks it to 0.96
-/// (glow dimming) and springs back with an `elasticOut` bounce; a faint glass
-/// shimmer sweeps the image header periodically. Sized by its parent — the
-/// [_ServicesCarousel] rail slot or a [_ServicesFluidGrid] cell.
-class _AnimatedCareServiceCard extends ConsumerStatefulWidget {
+/// Adapts a [ServiceCatalogItem] onto the shared [CareServiceCard].
+///
+/// The card itself is model-agnostic (it is also driven by the admin SDUI
+/// feed), so this thin wrapper owns the two things that are specific to the
+/// catalog: how a service's fields map onto the card's slots, and what tapping
+/// one does. There is no service detail screen — both the card body and the
+/// Book Now button prefill the booking form and jump straight to it.
+class _HomeServiceCard extends ConsumerWidget {
   final ServiceCatalogItem item;
-  const _AnimatedCareServiceCard({required this.item});
+  const _HomeServiceCard({required this.item});
 
   @override
-  ConsumerState<_AnimatedCareServiceCard> createState() =>
-      _AnimatedCareServiceCardState();
-}
+  Widget build(BuildContext context, WidgetRef ref) {
+    void book() {
+      ref
+          .read(newRequestProvider.notifier)
+          .applyServicePrefill(item, fromLink: true);
+      ref.goToNewRequest();
+    }
 
-class _AnimatedCareServiceCardState
-    extends ConsumerState<_AnimatedCareServiceCard>
-    with TickerProviderStateMixin {
-  // Press-scale controller; `_scale` is re-tweened per gesture so press-in
-  // (easeOut) and spring-back (elasticOut) can use different curves.
-  late final AnimationController _press = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 450),
-  );
-  Animation<double> _scale = const AlwaysStoppedAnimation(1.0);
-
-  // Perpetual, gentle shimmer sweep across the image header.
-  late final AnimationController _shimmer = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 3500),
-  )..repeat();
-
-  @override
-  void dispose() {
-    _press.dispose();
-    _shimmer.dispose();
-    super.dispose();
-  }
-
-  void _onTapDown(TapDownDetails _) {
-    _scale = Tween<double>(begin: 1.0, end: 0.96).animate(
-      CurvedAnimation(parent: _press, curve: Curves.easeOut),
-    );
-    _press
-      ..duration = const Duration(milliseconds: 120)
-      ..reset()
-      ..forward();
-  }
-
-  void _onTapRelease() {
-    _scale = Tween<double>(begin: 0.96, end: 1.0).animate(
-      CurvedAnimation(parent: _press, curve: Curves.elasticOut),
-    );
-    _press
-      ..duration = const Duration(milliseconds: 450)
-      ..reset()
-      ..forward();
-  }
-
-  /// Pre-selects this card's service in the booking form and jumps straight
-  /// to the New Request tab — no intermediate detail screen.
-  void _bookService() {
-    ref.read(newRequestProvider.notifier).applyServicePrefill(widget.item, fromLink: true);
-    ref.goToNewRequest();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final hd = HomeDark.of(context);
-    return AnimatedBuilder(
-      animation: _press,
-      builder: (context, child) {
-        final scale = _scale.value;
-        // 0 (released) .. 1 (fully pressed) — dims the glow on press.
-        final pressed = ((1.0 - scale) / 0.04).clamp(0.0, 1.0);
-        return Transform.scale(
-          scale: scale,
-          child: Container(
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(24),
-              boxShadow: [
-                BoxShadow(
-                  color:
-                      hd.violet.withValues(alpha: 0.30 * (1 - pressed)),
-                  blurRadius: 20,
-                  offset: const Offset(0, 10),
-                ),
-              ],
-            ),
-            child: child,
-          ),
-        );
-      },
-      child: _cardBody(),
-    );
-  }
-
-  Widget _cardBody() {
-    final hd = HomeDark.of(context);
-    final item = widget.item;
-    final hasCategory = item.category.trim().isNotEmpty;
-
-    return ClipRRect(
-      borderRadius: BorderRadius.circular(24),
-      // Material + InkWell replace the old DecoratedBox/GestureDetector pair
-      // so taps get a ripple clipped to the card's 24px corners. The InkWell
-      // also drives the press-scale controller, keeping the squash animation.
-      child: Material(
-        color: hd.surface,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(24),
-          side: BorderSide(color: hd.border),
-        ),
-        child: InkWell(
-          borderRadius: BorderRadius.circular(24),
-          onTapDown: _onTapDown,
-          onTapCancel: _onTapRelease,
-          onTap: () {
-            _onTapRelease();
-            _bookService();
-          },
-          child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            // ---- Top: photo / gradient+icon, badge, shimmer sweep ----
-            Expanded(
-              flex: 5,
-              child: ClipRRect(
-                borderRadius:
-                    const BorderRadius.vertical(top: Radius.circular(24)),
-                child: Stack(
-                  fit: StackFit.expand,
-                  children: [
-                    (item.imageUrl == null || item.imageUrl!.isEmpty)
-                        ? _ServiceHeaderFallback(icon: _serviceIcon(item))
-                        : CachedNetworkImage(
-                            imageUrl: item.imageUrl!,
-                            fit: BoxFit.cover,
-                            placeholder: (_, _) => const _ServiceHeaderFallback(),
-                            errorWidget: (_, _, _) =>
-                                _ServiceHeaderFallback(icon: _serviceIcon(item)),
-                          ),
-                    _ShimmerSweep(animation: _shimmer),
-                    if (hasCategory)
-                      Positioned(
-                        left: 8,
-                        top: 8,
-                        child: Container(
-                          padding: const EdgeInsets.symmetric(
-                              horizontal: 8, vertical: 3),
-                          decoration: BoxDecoration(
-                            color: hd.canvas.withValues(alpha: 0.55),
-                            borderRadius: BorderRadius.circular(6),
-                          ),
-                          child: Text(
-                            item.category,
-                            style: MtTextStyles.labelSm.copyWith(
-                              color: Colors.white,
-                              fontSize: 9,
-                            ),
-                          ),
-                        ),
-                      ),
-                  ],
-                ),
-              ),
-            ),
-            // ---- Bottom: obsidian block, name + price + emerald "+" ----
-            Expanded(
-              flex: 4,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(12, 10, 10, 10),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.end,
-                  children: [
-                    Expanded(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Text(
-                            item.title,
-                            maxLines: 2,
-                            overflow: TextOverflow.ellipsis,
-                            style: MtTextStyles.labelLg
-                                .copyWith(color: hd.title),
-                          ),
-                          const SizedBox(height: 4),
-                          Text(
-                            'from ${_patientMoney(item.price)}',
-                            maxLines: 1,
-                            overflow: TextOverflow.ellipsis,
-                            // Monospace + tabular figures for a clean, legible
-                            // price string.
-                            style: MtTextStyles.timer.copyWith(
-                              color: hd.muted,
-                              fontFeatures: const [
-                                ui.FontFeature.tabularFigures(),
-                              ],
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
-                    const SizedBox(width: 6),
-                    // Quick-add — same direct-booking action as tapping the
-                    // card body; presses independently (its own gesture wins
-                    // the arena over the card's InkWell).
-                    _AddServiceButton(onTap: _bookService),
-                  ],
-                ),
-              ),
-            ),
-          ],
-          ),
-        ),
-      ),
+    return CareServiceCard(
+      title: item.title,
+      description: item.description,
+      // Shown as stored, so an admin sees on Home exactly what they typed;
+      // the badge colour comes from the normalized value.
+      categoryLabel: item.category,
+      priceLabel: careServicePrice(item.price),
+      imageUrl: item.imageUrl,
+      onTap: book,
     );
   }
 }
 
-/// A faint diagonal light sweep that glides across the card header on a gentle
-/// repeat, then rests off-screen — the "living" glass shimmer. Purely
-/// decorative, so it ignores pointers.
-class _ShimmerSweep extends StatelessWidget {
-  final Animation<double> animation;
-  const _ShimmerSweep({required this.animation});
-
-  @override
-  Widget build(BuildContext context) {
-    return IgnorePointer(
-      child: AnimatedBuilder(
-        animation: animation,
-        builder: (context, _) {
-          // Sweep only during the first ~45% of the cycle; the band then sits
-          // off the right edge for the rest (a brief rest between sweeps).
-          final t = const Interval(0.0, 0.45, curve: Curves.easeInOut)
-              .transform(animation.value);
-          return FractionalTranslation(
-            translation: Offset(-1.0 + 2.0 * t, 0),
-            child: const DecoratedBox(
-              decoration: BoxDecoration(
-                gradient: LinearGradient(
-                  begin: Alignment.topLeft,
-                  end: Alignment.bottomRight,
-                  colors: [
-                    Color(0x00FFFFFF),
-                    Color(0x1AFFFFFF), // white @ ~10%
-                    Color(0x00FFFFFF),
-                  ],
-                  stops: [0.35, 0.5, 0.65],
-                ),
-              ),
-            ),
-          );
-        },
-      ),
-    );
-  }
-}
-
-/// Vivid violet gradient header used behind a service card — shown on its own
-/// (with the service's mapped icon) when there's no photo, and as the
-/// placeholder / error state while a photo loads or fails.
-class _ServiceHeaderFallback extends StatelessWidget {
-  final IconData? icon;
-  const _ServiceHeaderFallback({this.icon});
-
-  @override
-  Widget build(BuildContext context) {
-    final hd = HomeDark.of(context);
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        gradient: LinearGradient(
-          begin: Alignment.topLeft,
-          end: Alignment.bottomRight,
-          colors: [hd.violet2, hd.violetDeep],
-        ),
-      ),
-      child: icon == null
-          ? null
-          : Center(child: Icon(icon, color: Colors.white, size: 40)),
-    );
-  }
-}
-
-/// Small circular "+" affordance on a service card — an emerald-teal glyph on
-/// a translucent-teal disc with a thin teal ring. Presses **independently** of
-/// the card: its own gesture wins the arena, and it has its own scale-down +
-/// elastic spring-back so the button feels tactile on its own.
-class _AddServiceButton extends StatefulWidget {
-  final VoidCallback onTap;
-  const _AddServiceButton({required this.onTap});
-
-  @override
-  State<_AddServiceButton> createState() => _AddServiceButtonState();
-}
-
-class _AddServiceButtonState extends State<_AddServiceButton>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _press = AnimationController(
-    vsync: this,
-    duration: const Duration(milliseconds: 400),
-  );
-  Animation<double> _scale = const AlwaysStoppedAnimation(1.0);
-
-  @override
-  void dispose() {
-    _press.dispose();
-    super.dispose();
-  }
-
-  void _down(TapDownDetails _) {
-    _scale = Tween<double>(begin: 1.0, end: 0.85).animate(
-      CurvedAnimation(parent: _press, curve: Curves.easeOut),
-    );
-    _press
-      ..duration = const Duration(milliseconds: 110)
-      ..reset()
-      ..forward();
-  }
-
-  void _up() {
-    _scale = Tween<double>(begin: 0.85, end: 1.0).animate(
-      CurvedAnimation(parent: _press, curve: Curves.elasticOut),
-    );
-    _press
-      ..duration = const Duration(milliseconds: 400)
-      ..reset()
-      ..forward();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final hd = HomeDark.of(context);
-    return GestureDetector(
-      onTapDown: _down,
-      onTapUp: (_) => _up(),
-      onTapCancel: _up,
-      onTap: widget.onTap,
-      child: AnimatedBuilder(
-        animation: _press,
-        builder: (context, child) =>
-            Transform.scale(scale: _scale.value, child: child),
-        child: Container(
-          width: 30,
-          height: 30,
-          decoration: BoxDecoration(
-            color: hd.teal.withValues(alpha: 0.18),
-            shape: BoxShape.circle,
-            border: Border.all(color: hd.teal, width: 1),
-          ),
-          child: Icon(Icons.add_rounded, color: hd.teal, size: 20),
-        ),
-      ),
-    );
-  }
-}
-
+/// Placeholder rail shown while the catalog loads.
+///
+/// Mirrors the real card's silhouette — one full-bleed image block with the
+/// text stack anchored to the bottom — rather than an arbitrary shape, so the
+/// switch to loaded data doesn't visibly reflow the row.
 class _ServicesGridSkeleton extends StatelessWidget {
   const _ServicesGridSkeleton();
 
@@ -1799,38 +936,32 @@ class _ServicesGridSkeleton extends StatelessWidget {
       itemCount: 4,
       separatorBuilder: (_, _) => const SizedBox(width: 12),
       itemBuilder: (context, _) => Container(
-        width: _ServicesCarousel._railCardWidth,
+        width: kCareServiceCardWidth,
         clipBehavior: Clip.antiAlias,
         decoration: BoxDecoration(
-          color: hd.surface,
-          borderRadius: BorderRadius.circular(24),
+          color: hd.violet.withValues(alpha: 0.16),
+          borderRadius: BorderRadius.circular(kCareCardRadius),
           border: Border.all(color: hd.border),
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Expanded(
-              flex: 5,
-              child: ColoredBox(
-                color: hd.violet.withValues(alpha: 0.16),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 12, 12, 12),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.end,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              MtSkeleton.line(width: 120),
+              const SizedBox(height: 8),
+              MtSkeleton.line(width: 90, height: 10),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  MtSkeleton.line(width: 60, height: 12),
+                  const Spacer(),
+                  MtSkeleton.box(width: 90, height: 36, radius: 999),
+                ],
               ),
-            ),
-            Expanded(
-              flex: 4,
-              child: Padding(
-                padding: const EdgeInsets.fromLTRB(12, 12, 12, 12),
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  mainAxisAlignment: MainAxisAlignment.center,
-                  children: [
-                    MtSkeleton.line(width: 90),
-                    const SizedBox(height: 8),
-                    MtSkeleton.line(width: 60, height: 10),
-                  ],
-                ),
-              ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );

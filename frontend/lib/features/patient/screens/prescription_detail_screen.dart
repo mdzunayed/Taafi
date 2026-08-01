@@ -363,6 +363,15 @@ class _PrescriptionDetailScreenState
               ),
             ),
             pw.SizedBox(height: 12),
+            if (p.padPatientName.isNotEmpty)
+              kv(
+                'Patient',
+                [
+                  p.padPatientName,
+                  if ((p.patientSnapshot?.ageSexLine ?? '').isNotEmpty)
+                    p.patientSnapshot!.ageSexLine,
+                ].join(' · '),
+              ),
             kv('Diagnosis', p.diagnosis.isEmpty ? 'Not recorded' : p.diagnosis),
             if (p.symptoms.trim().isNotEmpty) kv('Symptoms', p.symptoms),
             kv('Issued', date),

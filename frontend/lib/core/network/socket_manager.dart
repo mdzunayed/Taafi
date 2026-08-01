@@ -71,6 +71,8 @@ class SocketManager {
   final _careLogs = StreamController<Map<String, dynamic>>.broadcast();
   final _paymentPrefs = StreamController<Map<String, dynamic>>.broadcast();
   final _walletUpdates = StreamController<Map<String, dynamic>>.broadcast();
+  final _bookingMilestones =
+      StreamController<Map<String, dynamic>>.broadcast();
 
   /// `new_notification` payloads (bell badge + hub list).
   Stream<Map<String, dynamic>> get onNotification => _notifications.stream;
@@ -138,6 +140,15 @@ class SocketManager {
   /// patient's own surfaces refresh, without waiting out the poll.
   Stream<Map<String, dynamic>> get onPaymentPreferenceUpdated =>
       _paymentPrefs.stream;
+
+  /// `booking:status_updated` events — an admin advanced the booking to a new
+  /// patient-facing milestone (or edited the scheduled appointment time);
+  /// payload `{appointmentId, milestone, milestoneStep, milestoneTotal,
+  /// scheduledTime, scheduledTimeLabel}`. Delivered to the patient user room
+  /// and the booking room, so the ONGOING CARE card's step bar and time pill
+  /// move the instant the admin acts instead of waiting out the poll.
+  Stream<Map<String, dynamic>> get onBookingStatusUpdated =>
+      _bookingMilestones.stream;
 
   void _connect(String token) {
     final socket = io.io(
@@ -232,6 +243,11 @@ class SocketManager {
       _walletUpdates.add(Map<String, dynamic>.from(payload));
     });
 
+    socket.on('booking:status_updated', (payload) {
+      if (_disposed || payload is! Map) return;
+      _bookingMilestones.add(Map<String, dynamic>.from(payload));
+    });
+
     _socket = socket;
     socket.connect();
   }
@@ -253,6 +269,7 @@ class SocketManager {
         socket.off('cash_ledger_cleared');
         socket.off('payment_preference_updated');
         socket.off('wallet_updated');
+        socket.off('booking:status_updated');
         socket.disconnect();
         socket.dispose();
       } catch (_) {
@@ -270,6 +287,8 @@ class SocketManager {
     _ledgerClears.close();
     _careLogs.close();
     _paymentPrefs.close();
+    _walletUpdates.close();
+    _bookingMilestones.close();
   }
 }
 

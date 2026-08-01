@@ -8,6 +8,8 @@ import 'package:intl/intl.dart';
 
 import '../../../../core/api/service_catalog_providers.dart';
 import '../../../../core/models/service_catalog_item.dart';
+import '../../../../core/models/provider_type.dart';
+import '../../../../core/models/service_category.dart';
 import '../../../../core/theme/mt_colors.dart';
 import '../../../../core/theme/mt_text_styles.dart';
 import '../../../../core/utils/image_upload.dart';
@@ -63,7 +65,7 @@ class ManageServicesTab extends ConsumerWidget {
               ),
               error: (e, _) => _ErrorBlock(
                 message: e.toString(),
-                onRetry: () => ref.refresh(allServicesProvider),
+                onRetry: () => refreshServiceCatalog(ref),
               ),
               data: (items) {
                 if (items.isEmpty) {
@@ -121,6 +123,7 @@ class _Header extends StatelessWidget {
           const SizedBox(width: 56),
           Expanded(flex: 4, child: Text('TITLE', style: _headerStyle)),
           Expanded(flex: 3, child: Text('CATEGORY', style: _headerStyle)),
+          Expanded(flex: 3, child: Text('ATTENDED BY', style: _headerStyle)),
           Expanded(flex: 2, child: Text('PRICE', style: _headerStyle)),
           Expanded(flex: 2, child: Text('STATUS', style: _headerStyle)),
           const SizedBox(width: 40),
@@ -179,6 +182,24 @@ class _ServiceRow extends ConsumerWidget {
                       style: MtTextStyles.labelSm.copyWith(color: MtColors.brand700),
                     ),
                   ),
+          ),
+          // Who attends — the field that words the patient's tracker. An
+          // inferred value is shown in parentheses so a row nobody has
+          // actually tagged is visible at a glance in the list.
+          Expanded(
+            flex: 3,
+            child: Text(
+              item.providerType == null
+                  ? '—'
+                  : item.providerTypeSource == 'assigned'
+                      ? item.providerType!.roleLabel
+                      : '${item.providerType!.roleLabel} (auto)',
+              style: MtTextStyles.bodySm.copyWith(
+                color: item.providerTypeSource == 'assigned'
+                    ? MtColors.ink
+                    : MtColors.ink3,
+              ),
+            ),
           ),
           Expanded(
             flex: 2,
@@ -339,11 +360,29 @@ class _ServiceFormDialogState extends ConsumerState<_ServiceFormDialog> {
   late final TextEditingController _title;
   late final TextEditingController _price;
   late final TextEditingController _description;
-  late final TextEditingController _category;
   late final TextEditingController _duration;
   late ServiceCatalogStatus _status;
   PreparedImage? _pickedImage;
   bool _saving = false;
+
+  /// The value that will be saved — '' (uncategorized), one of
+  /// [kServiceCategories], or [_legacyCategory] while the admin leaves it be.
+  String _category = '';
+
+  /// The stored value when it maps to neither canonical category. Kept so the
+  /// dropdown can offer it rather than silently resetting a service's category
+  /// to blank the moment someone opens the form to change its price.
+  String _legacyCategory = '';
+
+  /// Who attends this service. Null = untagged, which is a real state: the API
+  /// then infers a role from the title/category on every read. The form shows
+  /// what that inference currently produces so the admin can confirm it in one
+  /// tap instead of guessing what patients are being told.
+  ProviderType? _providerType;
+
+  /// The role the API inferred for an untagged service, echoed back on the
+  /// payload as `provider_type` + `provider_type_source: 'inferred'`.
+  ProviderType? _inferredProviderType;
 
   bool get _isEdit => widget.existing != null;
 
@@ -354,9 +393,21 @@ class _ServiceFormDialogState extends ConsumerState<_ServiceFormDialog> {
     _title = TextEditingController(text: e?.title ?? '');
     _price = TextEditingController(text: e == null ? '' : e.price.toStringAsFixed(0));
     _description = TextEditingController(text: e?.description ?? '');
-    _category = TextEditingController(text: e?.category ?? '');
     _duration = TextEditingController(text: e?.duration ?? '');
     _status = e?.status ?? ServiceCatalogStatus.active;
+
+    if (e != null && e.providerTypeSource == 'assigned') {
+      _providerType = e.providerType;
+    } else {
+      _inferredProviderType = e?.providerType;
+    }
+
+    final raw = (e?.category ?? '').trim();
+    _category = normalizeServiceCategory(raw);
+    if (raw.isNotEmpty && _category.isEmpty) {
+      _legacyCategory = raw;
+      _category = raw; // select it, so nothing is dropped behind the admin's back
+    }
   }
 
   @override
@@ -364,7 +415,6 @@ class _ServiceFormDialogState extends ConsumerState<_ServiceFormDialog> {
     _title.dispose();
     _price.dispose();
     _description.dispose();
-    _category.dispose();
     _duration.dispose();
     super.dispose();
   }
@@ -408,16 +458,28 @@ class _ServiceFormDialogState extends ConsumerState<_ServiceFormDialog> {
     }
     setState(() => _saving = true);
     final repo = ref.read(serviceCatalogRepositoryProvider);
+    final duration =
+        _duration.text.trim().isEmpty ? null : _duration.text.trim();
     try {
       if (_isEdit) {
         final existing = widget.existing!;
-        final updated = existing.copyWith(
+        // Built explicitly rather than with copyWith: that helper is
+        // `duration ?? this.duration`, so passing null to clear a duration was
+        // a no-op and an admin could never remove one. Every editable field
+        // comes from the form; only the server-owned ones carry over.
+        final updated = ServiceCatalogItem(
+          id: existing.id,
           title: _title.text.trim(),
           price: double.parse(_price.text.trim()),
           description: _description.text.trim(),
-          category: _category.text.trim(),
-          duration: _duration.text.trim().isEmpty ? null : _duration.text.trim(),
+          category: _category,
+          providerType: _providerType,
+          providerTypeSource: existing.providerTypeSource,
+          duration: duration,
+          imageUrl: existing.imageUrl,
           status: _status,
+          createdAt: existing.createdAt,
+          updatedAt: existing.updatedAt,
         );
         await repo.update(updated, newImage: _pickedImage);
       } else {
@@ -425,8 +487,9 @@ class _ServiceFormDialogState extends ConsumerState<_ServiceFormDialog> {
           title: _title.text.trim(),
           price: double.parse(_price.text.trim()),
           description: _description.text.trim(),
-          category: _category.text.trim(),
-          duration: _duration.text.trim().isEmpty ? null : _duration.text.trim(),
+          category: _category,
+          providerType: _providerType,
+          duration: duration,
           status: _status,
           image: _pickedImage!,
         );
@@ -503,9 +566,17 @@ class _ServiceFormDialogState extends ConsumerState<_ServiceFormDialog> {
                 ),
                 const SizedBox(height: 12),
                 _Label('Category'),
-                _Field(
-                  controller: _category,
-                  hint: 'e.g. Consultation / Lab Test / Home Visit',
+                _CategoryDropdown(
+                  value: _category,
+                  legacyValue: _legacyCategory,
+                  onChanged: (v) => setState(() => _category = v),
+                ),
+                const SizedBox(height: 12),
+                _Label('Attended by'),
+                _ProviderTypeDropdown(
+                  value: _providerType,
+                  inferred: _inferredProviderType,
+                  onChanged: (v) => setState(() => _providerType = v),
                 ),
                 const SizedBox(height: 12),
                 _Label('Duration / estimated time'),
@@ -689,29 +760,149 @@ class _Field extends StatelessWidget {
       keyboardType: keyboardType,
       validator: validator,
       style: MtTextStyles.bodyMd,
-      decoration: InputDecoration(
-        hintText: hint,
-        hintStyle: MtTextStyles.bodyMd.copyWith(color: MtColors.ink3),
-        filled: true,
-        fillColor: MtColors.surface,
-        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: const BorderSide(color: MtColors.line),
-        ),
-        enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: const BorderSide(color: MtColors.line),
-        ),
-        focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: const BorderSide(color: MtColors.brand, width: 1.5),
-        ),
-        errorBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: const BorderSide(color: MtColors.rejected),
-        ),
-      ),
+      decoration: _fieldDecoration(hint: hint),
     );
   }
+}
+
+/// Category picker for the service form.
+///
+/// Category used to be free text, which is how the database ended up with
+/// three parallel vocabularies and a patient filter rail that matched almost
+/// nothing. It is now a closed list — but deliberately **not required**: `''`
+/// is a real, meaningful answer for the services that are neither post-op care
+/// nor a doctor visit (lab collection, nurse-on-call), and forcing a pick would
+/// just push operators into mis-tagging them.
+///
+/// [legacyValue] is a stored category that maps to neither canonical label. It
+/// gets its own option plus a warning, because the backend normalizes on write:
+/// leaving it selected and saving an unrelated price change *will* blank it,
+/// and that is better said out loud than discovered later.
+class _CategoryDropdown extends StatelessWidget {
+  final String value;
+  final String legacyValue;
+  final ValueChanged<String> onChanged;
+
+  const _CategoryDropdown({
+    required this.value,
+    required this.legacyValue,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final hasLegacy = legacyValue.isNotEmpty;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        DropdownButtonFormField<String>(
+          initialValue: value,
+          decoration: _fieldDecoration(),
+          style: MtTextStyles.bodyMd.copyWith(color: MtColors.ink),
+          items: [
+            const DropdownMenuItem(
+              value: '',
+              child: Text('Uncategorized — shows under All only'),
+            ),
+            for (final c in kServiceCategories)
+              DropdownMenuItem(value: c, child: Text(c)),
+            if (hasLegacy)
+              DropdownMenuItem(
+                value: legacyValue,
+                child: Text('$legacyValue (legacy)'),
+              ),
+          ],
+          onChanged: (v) => onChanged(v ?? ''),
+        ),
+        if (hasLegacy && value == legacyValue) ...[
+          const SizedBox(height: 6),
+          Text(
+            "'$legacyValue' is no longer a recognised category. Saving will "
+            'clear it. Pick Post-op or Doctor in Home to keep this service '
+            'filterable on Home.',
+            style: MtTextStyles.bodySm.copyWith(color: MtColors.rejected),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+/// Picker for who attends a service — the field that words the patient's
+/// booking tracker ("Nurse On the Way" vs "Doctor On the Way"), names the
+/// registration number on the provider card, and selects the pre-arrival
+/// preparation tip.
+///
+/// "Not set" is offered deliberately rather than forcing a pick. An untagged
+/// service is not broken: the API infers a role from its title and category,
+/// and [inferred] shows exactly what that inference produces, so an operator
+/// can either confirm it in one tap or correct it — instead of a required
+/// field pushing them to pick whatever is at the top of the list.
+class _ProviderTypeDropdown extends StatelessWidget {
+  final ProviderType? value;
+  final ProviderType? inferred;
+  final ValueChanged<ProviderType?> onChanged;
+
+  const _ProviderTypeDropdown({
+    required this.value,
+    required this.inferred,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        DropdownButtonFormField<String>(
+          initialValue: value?.toWire() ?? '',
+          decoration: _fieldDecoration(),
+          style: MtTextStyles.bodyMd.copyWith(color: MtColors.ink),
+          items: [
+            const DropdownMenuItem(
+              value: '',
+              child: Text('Not set — decided from the title'),
+            ),
+            for (final t in ProviderType.values)
+              DropdownMenuItem(value: t.toWire(), child: Text(t.roleLabel)),
+          ],
+          onChanged: (v) => onChanged(ProviderTypeX.tryFromWire(v)),
+        ),
+        if (value == null) ...[
+          const SizedBox(height: 6),
+          Text(
+            inferred == null
+                ? 'Nothing can be read from this title, so bookings will be '
+                    'tracked as nursing care. Pick a role to change that.'
+                : 'Untagged: bookings are currently tracked as '
+                    '${inferred!.roleLabel.toLowerCase()} visits, read from the '
+                    'title and category. Pick a role to make it explicit.',
+            style: MtTextStyles.bodySm.copyWith(color: MtColors.ink3),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+/// Shared input chrome, so the category dropdown lines up pixel-for-pixel with
+/// the text fields above and below it.
+InputDecoration _fieldDecoration({String? hint}) {
+  OutlineInputBorder border(Color color, {double width = 1}) =>
+      OutlineInputBorder(
+        borderRadius: BorderRadius.circular(10),
+        borderSide: BorderSide(color: color, width: width),
+      );
+
+  return InputDecoration(
+    hintText: hint,
+    hintStyle: MtTextStyles.bodyMd.copyWith(color: MtColors.ink3),
+    filled: true,
+    fillColor: MtColors.surface,
+    contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+    border: border(MtColors.line),
+    enabledBorder: border(MtColors.line),
+    focusedBorder: border(MtColors.brand, width: 1.5),
+    errorBorder: border(MtColors.rejected),
+  );
 }

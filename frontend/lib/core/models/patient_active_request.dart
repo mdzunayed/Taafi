@@ -2,7 +2,10 @@ import 'package:equatable/equatable.dart';
 
 import 'assigned_doctor.dart';
 import 'assigned_nurse.dart';
+import 'assigned_provider.dart';
+import 'booking_milestone.dart';
 import 'patient_request_status.dart';
+import 'provider_type.dart';
 
 /// The patient's currently-open service request. Drives both the Home active
 /// card and the Under Review / Tracking tabs.
@@ -68,6 +71,43 @@ class PatientActiveRequest extends Equatable {
   /// Patient's phone (surfaced so the admin review portal can call/text).
   final String? patientPhone;
 
+  // --- Milestone tracker (Foodpanda-style ONGOING CARE card) ---------------
+  // All server-derived from the canonical status; see
+  // `backend/src/utils/bookingMilestones.js`.
+
+  /// Current patient-facing step of the six-step lifecycle.
+  final BookingMilestone milestone;
+
+  /// Server-rendered headline for [milestone] — folds the scheduled time into
+  /// the SCHEDULED step ("Provider Assigned — Scheduled for Today, 04:00 PM").
+  final String milestoneLabel;
+
+  /// The appointment window the ADMIN committed to. Distinct from
+  /// [scheduledAt] (`preferred_time`), which is what the patient asked for.
+  final DateTime? scheduledTime;
+
+  /// Server-formatted, Dhaka-local rendering of [scheduledTime] — e.g.
+  /// "Today, 04:00 PM". Null until an admin sets a time.
+  final String? scheduledTimeLabel;
+
+  /// Display name of the attending provider, when the admin set one.
+  final String? assignedProviderName;
+
+  /// Who is attending this booking. Server-resolved (the dispatched
+  /// provider's own role wins over the booked service's), and the source of
+  /// every role-dependent string on the tracker: the four middle timeline
+  /// steps, the provider card's badge and registration label, and the
+  /// pre-arrival preparation tip.
+  final ProviderType providerType;
+
+  /// The provider's contact card, once one is dispatched. Null before
+  /// assignment — and the reason the tracking screen can offer a direct call /
+  /// WhatsApp without the patient going through the support desk.
+  final AssignedProvider? assignedProvider;
+
+  /// The six-step timeline with per-step timestamps, for the tracking screen.
+  final List<MilestoneTimelineEntry> timeline;
+
   final DateTime updatedAt;
 
   const PatientActiveRequest({
@@ -96,7 +136,61 @@ class PatientActiveRequest extends Equatable {
     this.adjustedDiscount,
     this.paymentPreference,
     this.patientPhone,
+    this.milestone = BookingMilestone.requested,
+    this.milestoneLabel = '',
+    this.scheduledTime,
+    this.scheduledTimeLabel,
+    this.assignedProviderName,
+    this.providerType = ProviderTypeX.fallback,
+    this.assignedProvider,
+    this.timeline = const [],
   });
+
+  /// Headline for the tracker card — the server label when present, else the
+  /// milestone's own role-aware copy so the card is never blank and never
+  /// falls back to generic "Provider" wording.
+  String get milestoneHeadline => milestoneLabel.isNotEmpty
+      ? milestoneLabel
+      : milestone.labelFor(providerType);
+
+  /// The six-step timeline, falling back to a locally-derived one if the
+  /// backend didn't ship `milestone_timeline`.
+  List<MilestoneTimelineEntry> get resolvedTimeline => timeline.isNotEmpty
+      ? timeline
+      : MilestoneTimelineEntry.derive(milestone, providerType: providerType);
+
+  /// How to name the attending provider in the app's own copy — "Call Nurse",
+  /// "Your Doctor". Follows whoever is actually dispatched.
+  String get providerRoleLabel =>
+      (assignedProvider?.type ?? providerType).roleLabel;
+
+  /// True while a dispatched provider is either on their way or already
+  /// working — the window where the provider contact card and the pre-arrival
+  /// preparation tip are both relevant.
+  bool get isProviderActive =>
+      milestone == BookingMilestone.scheduled ||
+      milestone == BookingMilestone.enRoute ||
+      milestone == BookingMilestone.inService;
+
+  /// The pre-arrival guidance to show, or null outside the window where the
+  /// patient can still act on it (EN_ROUTE / IN_SERVICE).
+  String? get preparationTip {
+    if (milestone != BookingMilestone.enRoute &&
+        milestone != BookingMilestone.inService) {
+      return null;
+    }
+    return (assignedProvider?.type ?? providerType).preparationTip;
+  }
+
+  /// Best available provider name for the card: the admin's explicit override
+  /// first, then the assigned doctor/nurse records.
+  String? get displayProviderName {
+    final explicit = assignedProviderName?.trim();
+    if (explicit != null && explicit.isNotEmpty) return explicit;
+    final legacy = providerName?.trim();
+    if (legacy != null && legacy.isNotEmpty) return legacy;
+    return assignedNurse?.fullName;
+  }
 
   /// True once the patient has committed to paying in cash at the door.
   bool get isCashChosen => paymentPreference == 'CASH_ON_SERVICE';
@@ -119,6 +213,14 @@ class PatientActiveRequest extends Equatable {
     AssignedDoctor? assignedDoctor,
     AssignedNurse? assignedNurse,
     String? paymentPreference,
+    BookingMilestone? milestone,
+    String? milestoneLabel,
+    DateTime? scheduledTime,
+    String? scheduledTimeLabel,
+    String? assignedProviderName,
+    ProviderType? providerType,
+    AssignedProvider? assignedProvider,
+    List<MilestoneTimelineEntry>? timeline,
   }) {
     return PatientActiveRequest(
       id: id,
@@ -146,6 +248,14 @@ class PatientActiveRequest extends Equatable {
       adjustedDiscount: adjustedDiscount,
       paymentPreference: paymentPreference ?? this.paymentPreference,
       patientPhone: patientPhone,
+      milestone: milestone ?? this.milestone,
+      milestoneLabel: milestoneLabel ?? this.milestoneLabel,
+      scheduledTime: scheduledTime ?? this.scheduledTime,
+      scheduledTimeLabel: scheduledTimeLabel ?? this.scheduledTimeLabel,
+      assignedProviderName: assignedProviderName ?? this.assignedProviderName,
+      providerType: providerType ?? this.providerType,
+      assignedProvider: assignedProvider ?? this.assignedProvider,
+      timeline: timeline ?? this.timeline,
     );
   }
 
@@ -175,6 +285,14 @@ class PatientActiveRequest extends Equatable {
         adjustedDiscount,
         paymentPreference,
         patientPhone,
+        milestone,
+        milestoneLabel,
+        scheduledTime,
+        scheduledTimeLabel,
+        assignedProviderName,
+        providerType,
+        assignedProvider,
+        timeline,
         updatedAt,
       ];
 
@@ -183,6 +301,9 @@ class PatientActiveRequest extends Equatable {
       if (raw == null) return null;
       return DateTime.tryParse(raw.toString());
     }
+
+    final providerType =
+        ProviderTypeX.fromWire(json['providerType']?.toString());
 
     return PatientActiveRequest(
       id: json['id']?.toString() ?? '',
@@ -207,6 +328,21 @@ class PatientActiveRequest extends Equatable {
       adjustedDiscount: (json['adjustedDiscount'] as num?)?.toDouble(),
       paymentPreference: json['paymentPreference']?.toString(),
       patientPhone: json['patientPhone']?.toString(),
+      milestone: BookingMilestoneX.fromWire(json['milestone']?.toString()),
+      milestoneLabel: json['milestoneLabel']?.toString() ?? '',
+      scheduledTime: parseOptional(json['scheduledTime']),
+      scheduledTimeLabel: json['scheduledTimeLabel']?.toString(),
+      assignedProviderName: json['assignedProviderName']?.toString(),
+      providerType: providerType,
+      assignedProvider: AssignedProvider.fromJson(
+        json['assignedProvider'],
+        fallbackType: providerType,
+      ),
+      timeline: MilestoneTimelineEntry.listFrom(
+        json['timeline'],
+        current: BookingMilestoneX.fromWire(json['milestone']?.toString()),
+        providerType: providerType,
+      ),
       updatedAt: parseOptional(json['updatedAt']) ?? DateTime.now(),
     );
   }
@@ -234,6 +370,13 @@ class PatientActiveRequest extends Equatable {
         'adjustedDiscount': adjustedDiscount,
         'paymentPreference': paymentPreference,
         'patientPhone': patientPhone,
+        'milestone': milestone.toWire(),
+        'milestoneLabel': milestoneLabel,
+        'scheduledTime': scheduledTime?.toIso8601String(),
+        'scheduledTimeLabel': scheduledTimeLabel,
+        'assignedProviderName': assignedProviderName,
+        'providerType': providerType.toWire(),
+        'assignedProvider': assignedProvider?.toJson(),
         'updatedAt': updatedAt.toIso8601String(),
       };
 }

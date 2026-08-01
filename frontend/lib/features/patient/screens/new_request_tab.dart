@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
+import '../../../core/api/patient_home_repository.dart';
 import '../../../core/api/service_catalog_providers.dart';
 import '../../../core/models/dependent.dart';
 import '../../../core/models/saved_address.dart';
@@ -20,6 +21,7 @@ import '../profile/patient_lifecycle_providers.dart';
 import 'booking_flow_pages.dart';
 import 'family_profiles_screen.dart';
 import 'select_address_sheet.dart';
+import 'widgets/active_booking_banner.dart';
 
 /// New care-request flow. Pure ConsumerWidget — all form state lives in
 /// [newRequestProvider], all dependency data flows through Riverpod providers.
@@ -166,6 +168,7 @@ class _NewRequestTabState extends ConsumerState<NewRequestTab> {
   Widget build(BuildContext context) {
     final state = ref.watch(newRequestProvider);
     final servicesAsync = ref.watch(activeServicesProvider);
+    final hasActiveBooking = ref.watch(patientActiveRequestProvider) != null;
     _syncControllers(state);
 
     // A card the patient tapped (home section linked to a service, promo
@@ -321,9 +324,14 @@ class _NewRequestTabState extends ConsumerState<NewRequestTab> {
           ),
         ),
         _SubmitBar(
+          // One booking at a time — `POST /patient/requests` answers 409
+          // while a non-terminal request is open, so the form is sealed and
+          // the banner offers the way out (jump to the open booking).
+          blocked: hasActiveBooking,
           enabled: state.selectedService != null &&
               !state.address.isEmpty &&
-              !state.isSubmitting,
+              !state.isSubmitting &&
+              !hasActiveBooking,
           isLoading: state.isSubmitting,
           onSubmit: () => _handleSubmit(context, ref),
         ),
@@ -738,7 +746,7 @@ class _ServiceSelector extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     return AsyncValueView<List<ServiceCatalogItem>>(
       value: async,
-      onRetry: () => ref.refresh(activeServicesProvider),
+      onRetry: () => refreshServiceCatalog(ref),
       loadingBuilder: (_) => Column(
         children: List.generate(
           3,
@@ -1335,11 +1343,17 @@ class _InlineError extends StatelessWidget {
 
 class _SubmitBar extends StatelessWidget {
   final bool enabled;
+
+  /// Submission is barred specifically because another booking is still open
+  /// (as opposed to a merely incomplete form) — swaps the pricing note for
+  /// the tappable active-booking banner.
+  final bool blocked;
   final bool isLoading;
   final VoidCallback onSubmit;
 
   const _SubmitBar({
     required this.enabled,
+    required this.blocked,
     required this.isLoading,
     required this.onSubmit,
   });
@@ -1360,18 +1374,23 @@ class _SubmitBar extends StatelessWidget {
           children: [
             // Pricing is negotiated by the admin team after submission, so
             // there's no patient-facing total here — just set expectations.
-            Row(
-              children: [
-                Icon(Icons.info_outline, size: 16, color: c.muted),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    'Admin will contact you directly to finalize service payment terms.',
-                    style: MtTextStyles.bodySm.copyWith(color: c.body),
+            // While a booking is already open that note is moot; the reason
+            // the button is dead is the more useful thing to say.
+            if (blocked)
+              const ActiveBookingBanner()
+            else
+              Row(
+                children: [
+                  Icon(Icons.info_outline, size: 16, color: c.muted),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      'Admin will contact you directly to finalize service payment terms.',
+                      style: MtTextStyles.bodySm.copyWith(color: c.body),
+                    ),
                   ),
-                ),
-              ],
-            ),
+                ],
+              ),
             const SizedBox(height: 12),
             SizedBox(
               width: double.infinity,

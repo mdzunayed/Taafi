@@ -8,6 +8,7 @@ import '../../../../core/api/promo_banner_providers.dart';
 import '../../../../core/api/service_catalog_providers.dart';
 import '../../../../core/models/promo_banner.dart';
 import '../../../../core/models/service_catalog_item.dart';
+import '../../../../core/models/service_category.dart';
 import '../../../../core/theme/mt_colors.dart';
 import '../../../../core/theme/mt_text_styles.dart';
 import '../../../../core/utils/image_upload.dart';
@@ -909,11 +910,14 @@ class _ServiceTargetPicker extends ConsumerWidget {
   }
 }
 
-/// Category picker for [BannerActionType.category]. Services have no fixed
-/// category taxonomy of their own (`Service.category` is admin free-text —
-/// see `manage_services_tab.dart`), so the dropdown offers whatever distinct
-/// values are already in use, and a text field underneath lets the admin
-/// target a category that doesn't exist on any service yet.
+/// Category picker for [BannerActionType.category].
+///
+/// The dropdown always offers the two canonical categories
+/// ([kServiceCategories]) so a banner can target one before any service
+/// carries it, unioned with whatever other distinct values are still in use on
+/// live services. The text field underneath stays as an escape hatch — the
+/// patient catalog screen this targets still honours a raw match for values
+/// with no canonical home.
 class _CategoryTargetPicker extends ConsumerWidget {
   final TextEditingController controller;
   const _CategoryTargetPicker({required this.controller});
@@ -921,38 +925,38 @@ class _CategoryTargetPicker extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final async = ref.watch(activeServicesProvider);
-    final categories = async.maybeWhen(
+    final inUse = async.maybeWhen(
       data: (services) {
         final set = <String>{
           for (final s in services)
             if (s.category.trim().isNotEmpty) s.category.trim(),
         };
+        // The canonical pair is always offerable; the rest sort after it.
+        set.removeAll(kServiceCategories);
         return set.toList()..sort();
       },
       orElse: () => const <String>[],
     );
+    final categories = [...kServiceCategories, ...inUse];
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        if (categories.isNotEmpty)
-          DropdownButtonFormField<String>(
-            initialValue: categories.contains(controller.text.trim())
-                ? controller.text.trim()
-                : null,
-            decoration: _fieldDecoration(hint: 'Choose an existing category'),
-            items: [
-              for (final c in categories)
-                DropdownMenuItem(value: c, child: Text(c)),
-            ],
-            onChanged: (v) => controller.text = v ?? '',
-          ),
-        if (categories.isNotEmpty) const SizedBox(height: 8),
+        DropdownButtonFormField<String>(
+          initialValue: categories.contains(controller.text.trim())
+              ? controller.text.trim()
+              : null,
+          decoration: _fieldDecoration(hint: 'Choose a category'),
+          items: [
+            for (final c in categories)
+              DropdownMenuItem(value: c, child: Text(c)),
+          ],
+          onChanged: (v) => controller.text = v ?? '',
+        ),
+        const SizedBox(height: 8),
         _Field(
           controller: controller,
-          hint: categories.isEmpty
-              ? 'e.g. Nursing Care'
-              : 'Or type a category not listed above',
+          hint: 'Or type a category not listed above',
         ),
       ],
     );

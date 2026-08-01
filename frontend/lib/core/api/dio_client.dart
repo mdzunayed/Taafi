@@ -83,6 +83,22 @@ class AuthException implements Exception {
   String toString() => message;
 }
 
+/// Thrown by [DioClient.createRequest] when `POST /patient/requests` answers
+/// 409 — the patient still holds a non-terminal booking, so a second one is
+/// refused. Carries the blocking request's id so the UI can route to it.
+///
+/// Message-only [toString] so call sites that just stringify the error show
+/// the backend's copy rather than an exception dump.
+class ActiveBookingConflict implements Exception {
+  final String message;
+  final String? activeRequestId;
+
+  const ActiveBookingConflict({required this.message, this.activeRequestId});
+
+  @override
+  String toString() => message;
+}
+
 class DioClient {
   // Live backend base URL. Defaults to the deployed Render host so a plain
   // `flutter run` / release build talks to production with no flags. Override
@@ -136,8 +152,8 @@ class DioClient {
     _dio = Dio(
       BaseOptions(
         baseUrl: _baseUrl,
-        connectTimeout: const Duration(seconds: 30),
-        receiveTimeout: const Duration(seconds: 30),
+        connectTimeout: const Duration(seconds: 50),
+        receiveTimeout: const Duration(seconds: 50),
         contentType: 'application/json',
       ),
     );
@@ -170,8 +186,7 @@ class DioClient {
           // completed and the UI froze silently. Let auth 401s propagate so
           // _handleError can surface the backend's message.
           final status = error.response?.statusCode;
-          final isAuthEndpoint =
-              error.requestOptions.path.contains('/auth/');
+          final isAuthEndpoint = error.requestOptions.path.contains('/auth/');
           final alreadyRetried =
               error.requestOptions.extra['authRetried'] == true;
           if (status == 401 && !isAuthEndpoint && !alreadyRetried) {
@@ -182,9 +197,7 @@ class DioClient {
                 // preserved; onRequest injects the fresh bearer). The
                 // extra flag caps this at one retry per request.
                 error.requestOptions.extra['authRetried'] = true;
-                return handler.resolve(
-                  await _dio.fetch(error.requestOptions),
-                );
+                return handler.resolve(await _dio.fetch(error.requestOptions));
               } on DioException catch (retryError) {
                 // Retry failed too — reject with the newer error so the
                 // caller's Future always completes. (If the retry itself
@@ -280,11 +293,7 @@ class DioClient {
       // [tokenProvider] already initialised from the same `auth_token` key at
       // boot, so the interceptor is already carrying this token — nothing to
       // push here.
-      return AuthToken(
-        token: token,
-        refreshToken: refresh ?? '',
-        user: user,
-      );
+      return AuthToken(token: token, refreshToken: refresh ?? '', user: user);
     } catch (e) {
       // Disk write from an older app version with an incompatible shape
       // — drop it rather than crashing the boot.
@@ -367,8 +376,7 @@ class DioClient {
   }) async {
     final cleanPhone = (phone ?? '').trim();
     final cleanEmail = (email ?? '').trim();
-    final identifierForMock =
-        cleanPhone.isNotEmpty ? cleanPhone : cleanEmail;
+    final identifierForMock = cleanPhone.isNotEmpty ? cleanPhone : cleanEmail;
     if (_useMockMode) {
       return _mockLogin(identifierForMock, password);
     }
@@ -563,9 +571,7 @@ class DioClient {
   /// credential. On success the server clears the latch, flips the
   /// account to verified, and re-issues a clean session (same wire
   /// shape as a fresh login).
-  Future<AuthToken> completePasswordReset({
-    required String newPassword,
-  }) async {
+  Future<AuthToken> completePasswordReset({required String newPassword}) async {
     try {
       final response = await _dio.post<Map<String, dynamic>>(
         '/api/auth/complete-password-reset',
@@ -613,10 +619,7 @@ class DioClient {
     try {
       final response = await _dio.patch<Map<String, dynamic>>(
         '/api/admin/providers/$providerId/update-profile',
-        data: {
-          ...updates,
-          'otp': otp,
-        },
+        data: {...updates, 'otp': otp},
       );
       final body = response.data ?? const <String, dynamic>{};
       final providerJson = body['provider'];
@@ -664,7 +667,8 @@ class DioClient {
       final res = await _dio.get<Map<String, dynamic>>(
         '/api/appointments/latest-completed',
         queryParameters: {
-          if (accountId != null && accountId.isNotEmpty) 'account_id': accountId,
+          if (accountId != null && accountId.isNotEmpty)
+            'account_id': accountId,
         },
       );
       return Appointment.fromJson(res.data ?? const <String, dynamic>{});
@@ -693,10 +697,7 @@ class DioClient {
     try {
       final res = await _dio.get<Map<String, dynamic>>(
         '/api/appointments/patient/history',
-        queryParameters: {
-          'account_id': accountId,
-          'limit': limit,
-        },
+        queryParameters: {'account_id': accountId, 'limit': limit},
       );
       final body = res.data ?? const <String, dynamic>{};
       final raw = body['appointments'];
@@ -747,9 +748,7 @@ class DioClient {
       return _mockLatestAppointment()!;
     }
     try {
-      final res = await _dio.get<Map<String, dynamic>>(
-        '/api/appointments/$id',
-      );
+      final res = await _dio.get<Map<String, dynamic>>('/api/appointments/$id');
       return Appointment.fromJson(res.data ?? const <String, dynamic>{});
     } on DioException catch (e) {
       throw _handleError(e);
@@ -765,7 +764,8 @@ class DioClient {
       final res = await _dio.get<dynamic>(
         '/api/notifications',
         queryParameters: {
-          if (accountId != null && accountId.isNotEmpty) 'account_id': accountId,
+          if (accountId != null && accountId.isNotEmpty)
+            'account_id': accountId,
         },
       );
       final data = res.data;
@@ -777,15 +777,13 @@ class DioClient {
   }
 
   /// `PATCH /api/notifications/:id/read` — flip one notification to read.
-  Future<void> markHubNotificationRead(
-    String id, {
-    String? accountId,
-  }) async {
+  Future<void> markHubNotificationRead(String id, {String? accountId}) async {
     try {
       await _dio.patch<dynamic>(
         '/api/notifications/$id/read',
         queryParameters: {
-          if (accountId != null && accountId.isNotEmpty) 'account_id': accountId,
+          if (accountId != null && accountId.isNotEmpty)
+            'account_id': accountId,
         },
       );
     } on DioException catch (e) {
@@ -799,7 +797,8 @@ class DioClient {
       final res = await _dio.patch<dynamic>(
         '/api/notifications/read-all',
         queryParameters: {
-          if (accountId != null && accountId.isNotEmpty) 'account_id': accountId,
+          if (accountId != null && accountId.isNotEmpty)
+            'account_id': accountId,
         },
       );
       final data = res.data;
@@ -817,7 +816,9 @@ class DioClient {
   /// [MessageModel] parser owns the wire-shape mapping; here we only
   /// guarantee the network call succeeded and unwrap the `messages`
   /// envelope the backend uses.
-  Future<List<Map<String, dynamic>>> getChatHistory(String appointmentId) async {
+  Future<List<Map<String, dynamic>>> getChatHistory(
+    String appointmentId,
+  ) async {
     try {
       final res = await _dio.get<dynamic>('/api/chat/$appointmentId');
       final data = res.data;
@@ -963,10 +964,7 @@ class DioClient {
     try {
       final res = await _dio.get<dynamic>(
         '/api/conversations/$conversationId/messages',
-        queryParameters: {
-          'limit': limit,
-          'before': ?before,
-        },
+        queryParameters: {'limit': limit, 'before': ?before},
       );
       final data = res.data;
       final List rawList;
@@ -1143,7 +1141,8 @@ class DioClient {
     final user = _createMockUser(email);
 
     // Create mock token (JWT-like format)
-    const mockToken = 'mock_jwt_eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U';
+    const mockToken =
+        'mock_jwt_eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U';
     const mockRefreshToken = 'mock_refresh_token_abcdefg123456';
 
     final authToken = AuthToken(
@@ -1210,8 +1209,9 @@ class DioClient {
       return PatientHomeFeed(
         activeRequest: _mockPatientActiveRequest,
         recentProviders: List.unmodifiable(_mockRecentProviders),
-        unreadNotificationCount:
-            _mockPatientNotifications.where((n) => !n.read).length,
+        unreadNotificationCount: _mockPatientNotifications
+            .where((n) => !n.read)
+            .length,
         fetchedAt: DateTime.now(),
       );
     }
@@ -1219,7 +1219,9 @@ class DioClient {
       final response = await _dio.get<Map<String, dynamic>>('/patient/home');
       // Live Mongo documents are snake_case; route through the dedicated
       // parser rather than the camelCase PatientHomeFeed.fromJson.
-      return patientHomeFeedFromMongo(response.data ?? const <String, dynamic>{});
+      return patientHomeFeedFromMongo(
+        response.data ?? const <String, dynamic>{},
+      );
     } on DioException catch (e) {
       throw _handleError(e);
     }
@@ -1248,8 +1250,8 @@ class DioClient {
       _ensurePatientMockSeeded();
       final idx = _mockPatientNotifications.indexWhere((n) => n.id == id);
       if (idx != -1) {
-        _mockPatientNotifications[idx] =
-            _mockPatientNotifications[idx].copyWith(read: true);
+        _mockPatientNotifications[idx] = _mockPatientNotifications[idx]
+            .copyWith(read: true);
       }
       return;
     }
@@ -1266,8 +1268,9 @@ class DioClient {
       _ensurePatientMockSeeded();
       for (var i = 0; i < _mockPatientNotifications.length; i++) {
         if (!_mockPatientNotifications[i].read) {
-          _mockPatientNotifications[i] =
-              _mockPatientNotifications[i].copyWith(read: true);
+          _mockPatientNotifications[i] = _mockPatientNotifications[i].copyWith(
+            read: true,
+          );
         }
       }
       return;
@@ -1298,14 +1301,14 @@ class DioClient {
           ? 'Patient address on file'
           : locationParts.join(', ');
       final scheduledAtRaw = requestData['scheduledAt'] as String?;
-      final scheduledAt =
-          scheduledAtRaw != null ? DateTime.tryParse(scheduledAtRaw) : null;
+      final scheduledAt = scheduledAtRaw != null
+          ? DateTime.tryParse(scheduledAtRaw)
+          : null;
 
       _mockPatientActiveRequest = PatientActiveRequest(
         id: id,
         serviceTitleEn: (requestData['serviceTitle'] as String?) ?? 'New visit',
-        serviceTitleBn:
-            (requestData['serviceTitleBn'] as String?) ?? '',
+        serviceTitleBn: (requestData['serviceTitleBn'] as String?) ?? '',
         status: PatientRequestStatus.pendingReview,
         locationLabel: locationLabel,
         requestedAt: now,
@@ -1338,8 +1341,8 @@ class DioClient {
       _ensureAdminMockSeeded();
       final patientName =
           (requestData['patientName'] as String?)?.trim().isNotEmpty == true
-              ? requestData['patientName'] as String
-              : 'New Patient';
+          ? requestData['patientName'] as String
+          : 'New Patient';
       final serviceTitle =
           (requestData['serviceTitle'] as String?) ?? 'New visit';
       final area = (address['areaCityZip'] as String?) ?? '';
@@ -1352,8 +1355,7 @@ class DioClient {
         serviceName: serviceTitle,
         location: locationLabel,
         area: area.split(',').first.trim(),
-        durationHours:
-            (requestData['durationHours'] as num?)?.toInt() ?? 2,
+        durationHours: (requestData['durationHours'] as num?)?.toInt() ?? 2,
         asap: scheduledAt == null,
         scheduledTime: scheduledAt,
         status: 'pending',
@@ -1394,10 +1396,21 @@ class DioClient {
       final res = await _dio.post<Map<String, dynamic>>(
         '/patient/requests',
         data: requestData,
-        options: Options(
-          validateStatus: (s) => s != null && s < 500,
-        ),
+        options: Options(validateStatus: (s) => s != null && s < 500),
       );
+      // 409 = the one-active-booking rule fired server-side: this patient
+      // still holds a non-terminal request. Distinct from a transport
+      // failure — nothing is worth retrying and the form should not be
+      // cached as "offline", so it gets its own typed error.
+      if (res.statusCode == 409) {
+        final body = res.data ?? const <String, dynamic>{};
+        throw ActiveBookingConflict(
+          message: (body['message'] as String?)?.trim().isNotEmpty == true
+              ? body['message'] as String
+              : 'You already have an active booking in progress.',
+          activeRequestId: body['active_request_id']?.toString(),
+        );
+      }
       if (res.statusCode != 201) {
         throw DioException(
           requestOptions: res.requestOptions,
@@ -1601,8 +1614,9 @@ class DioClient {
   /// admin decision (default), or the decided sets via [status]
   /// ('approved' | 'rejected'). Rows arrive unredacted with a
   /// `patient` contact block.
-  Future<List<Prescription>> adminGetPrescriptionReviewQueue(
-      {String? status}) async {
+  Future<List<Prescription>> adminGetPrescriptionReviewQueue({
+    String? status,
+  }) async {
     if (_useMockMode) {
       await Future.delayed(const Duration(milliseconds: 300));
       return const <Prescription>[];
@@ -1642,10 +1656,7 @@ class DioClient {
     try {
       final res = await _dio.patch<Map<String, dynamic>>(
         '/admin/prescriptions/$prescriptionId/approval',
-        data: {
-          'action': approve ? 'approve' : 'reject',
-          'reason': ?reason,
-        },
+        data: {'action': approve ? 'approve' : 'reject', 'reason': ?reason},
       );
       final body = res.data ?? const <String, dynamic>{};
       final raw = body['prescription'];
@@ -1668,17 +1679,12 @@ class DioClient {
   }) async {
     if (_useMockMode) {
       await Future.delayed(const Duration(milliseconds: 400));
-      return {
-        'id': requestId,
-        'status': 'cancelled',
-      };
+      return {'id': requestId, 'status': 'cancelled'};
     }
     try {
       final res = await _dio.post<Map<String, dynamic>>(
         '/admin/requests/$requestId/cancel',
-        data: {
-          'reason': ?reason,
-        },
+        data: {'reason': ?reason},
       );
       return res.data ?? const <String, dynamic>{};
     } on DioException catch (e) {
@@ -1695,7 +1701,10 @@ class DioClient {
     }
   }
 
-  Future<void> submitRating(String serviceId, Map<String, dynamic> rating) async {
+  Future<void> submitRating(
+    String serviceId,
+    Map<String, dynamic> rating,
+  ) async {
     try {
       await _dio.post('/patient/services/$serviceId/rating', data: rating);
     } on DioException catch (e) {
@@ -1710,8 +1719,9 @@ class DioClient {
       return _mockDoctorDashboard();
     }
     try {
-      final response =
-          await _dio.get<Map<String, dynamic>>('/doctor/dashboard');
+      final response = await _dio.get<Map<String, dynamic>>(
+        '/doctor/dashboard',
+      );
       // Live MongoDB documents are snake_case; route through the
       // dedicated parser instead of the camelCase `DoctorDashboard.fromJson`
       // (which stays in place for any internal mock callers).
@@ -1787,6 +1797,9 @@ class DioClient {
     double? heightCm,
     String? advice,
     DateTime? followUpDate,
+    String? patientName,
+    int? patientAge,
+    String? patientGender,
   }) async {
     try {
       final res = await _dio.post<Map<String, dynamic>>(
@@ -1797,6 +1810,14 @@ class DioClient {
             'patientAccountId': patientAccountId,
           if (doctorName != null && doctorName.isNotEmpty)
             'doctorName': doctorName,
+          // Pad "Patient:" line. The doctor can correct the booked name
+          // on the form, so this overrides the server's care-recipient
+          // fallback when present.
+          if (patientName != null && patientName.isNotEmpty)
+            'patient_name': patientName,
+          'patient_age': ?patientAge,
+          if (patientGender != null && patientGender.isNotEmpty)
+            'patient_gender': patientGender,
           if (diagnosis != null && diagnosis.isNotEmpty) 'diagnosis': diagnosis,
           // Pad extras — the server snapshots BP from the visit's
           // vitals itself; weight/height/advice/follow-up ride along
@@ -1913,8 +1934,9 @@ class DioClient {
       // reflects the transition without a backend.
       final idx = _mockAdminRequests.indexWhere((r) => r.id == requestId);
       if (idx != -1) {
-        _mockAdminRequests[idx] =
-            _mockAdminRequests[idx].copyWith(status: newStatus);
+        _mockAdminRequests[idx] = _mockAdminRequests[idx].copyWith(
+          status: newStatus,
+        );
       }
       return {'id': requestId, 'status': newStatus};
     }
@@ -1946,14 +1968,17 @@ class DioClient {
       return;
     }
     try {
-      await _dio.post('/doctor/location', data: {
-        'doctor_id': doctorId,
-        'latitude': latitude,
-        'longitude': longitude,
-        'accuracy_meters': ?accuracyMeters,
-        'speed_mps': ?speedMps,
-        'reported_at': DateTime.now().toIso8601String(),
-      });
+      await _dio.post(
+        '/doctor/location',
+        data: {
+          'doctor_id': doctorId,
+          'latitude': latitude,
+          'longitude': longitude,
+          'accuracy_meters': ?accuracyMeters,
+          'speed_mps': ?speedMps,
+          'reported_at': DateTime.now().toIso8601String(),
+        },
+      );
     } on DioException catch (e) {
       throw _handleError(e);
     }
@@ -1970,10 +1995,10 @@ class DioClient {
       // Backend requires `doctor_id` to know which Provider row to flip.
       // Without it the route returns 400 and the toggle stays out of sync
       // with the admin's match queue.
-      await _dio.patch('/doctor/availability', data: {
-        'doctor_id': ?doctorId,
-        'online': online,
-      });
+      await _dio.patch(
+        '/doctor/availability',
+        data: {'doctor_id': ?doctorId, 'online': online},
+      );
     } on DioException catch (e) {
       throw _handleError(e);
     }
@@ -2018,8 +2043,9 @@ class DioClient {
       return ProviderEarnings.empty;
     }
     try {
-      final res =
-          await _dio.get<Map<String, dynamic>>('/api/provider/earnings');
+      final res = await _dio.get<Map<String, dynamic>>(
+        '/api/provider/earnings',
+      );
       return ProviderEarnings.fromJson(res.data ?? const <String, dynamic>{});
     } on DioException catch (e) {
       throw _handleError(e);
@@ -2046,8 +2072,7 @@ class DioClient {
       );
     }
     try {
-      final res =
-          await _dio.get<Map<String, dynamic>>('/api/provider/wallet');
+      final res = await _dio.get<Map<String, dynamic>>('/api/provider/wallet');
       return ProviderWalletSnapshot.fromJson(
         res.data ?? const <String, dynamic>{},
       );
@@ -2131,8 +2156,7 @@ class DioClient {
       if (raw is! List) return const <PayoutRequestModel>[];
       return raw
           .whereType<Map>()
-          .map(
-              (e) => PayoutRequestModel.fromJson(Map<String, dynamic>.from(e)))
+          .map((e) => PayoutRequestModel.fromJson(Map<String, dynamic>.from(e)))
           .toList();
     } on DioException catch (e) {
       throw _handleError(e);
@@ -2177,11 +2201,14 @@ class DioClient {
     try {
       final res = id == null
           ? await _dio.post<Map<String, dynamic>>('/api/addresses', data: data)
-          : await _dio.patch<Map<String, dynamic>>('/api/addresses/$id',
-              data: data);
+          : await _dio.patch<Map<String, dynamic>>(
+              '/api/addresses/$id',
+              data: data,
+            );
       final body = res.data ?? const <String, dynamic>{};
       return SavedAddress.fromJson(
-          Map<String, dynamic>.from(body['address'] as Map? ?? body));
+        Map<String, dynamic>.from(body['address'] as Map? ?? body),
+      );
     } on DioException catch (e) {
       throw _handleError(e);
     }
@@ -2189,11 +2216,13 @@ class DioClient {
 
   Future<SavedAddress> setDefaultAddress(String id) async {
     try {
-      final res = await _dio
-          .patch<Map<String, dynamic>>('/api/addresses/$id/default');
+      final res = await _dio.patch<Map<String, dynamic>>(
+        '/api/addresses/$id/default',
+      );
       final body = res.data ?? const <String, dynamic>{};
       return SavedAddress.fromJson(
-          Map<String, dynamic>.from(body['address'] as Map? ?? body));
+        Map<String, dynamic>.from(body['address'] as Map? ?? body),
+      );
     } on DioException catch (e) {
       throw _handleError(e);
     }
@@ -2247,11 +2276,14 @@ class DioClient {
     try {
       final res = id == null
           ? await _dio.post<Map<String, dynamic>>('/api/dependents', data: data)
-          : await _dio.patch<Map<String, dynamic>>('/api/dependents/$id',
-              data: data);
+          : await _dio.patch<Map<String, dynamic>>(
+              '/api/dependents/$id',
+              data: data,
+            );
       final body = res.data ?? const <String, dynamic>{};
       return Dependent.fromJson(
-          Map<String, dynamic>.from(body['dependent'] as Map? ?? body));
+        Map<String, dynamic>.from(body['dependent'] as Map? ?? body),
+      );
     } on DioException catch (e) {
       throw _handleError(e);
     }
@@ -2425,8 +2457,9 @@ class DioClient {
       final out = <PatientHistoryItem>[];
       for (final e in list) {
         try {
-          out.add(PatientHistoryItem.fromJson(
-              Map<String, dynamic>.from(e as Map)));
+          out.add(
+            PatientHistoryItem.fromJson(Map<String, dynamic>.from(e as Map)),
+          );
         } catch (err) {
           // Skip malformed rows; never blank the whole list over one bad doc.
           assert(() {
@@ -2482,7 +2515,8 @@ class DioClient {
       final res = await _dio.get<Map<String, dynamic>>(
         '/doctor/$doctorId/patients',
         queryParameters: {
-          if (search != null && search.trim().isNotEmpty) 'search': search.trim(),
+          if (search != null && search.trim().isNotEmpty)
+            'search': search.trim(),
         },
       );
       final raw = (res.data ?? const {})['patients'];
@@ -2554,7 +2588,8 @@ class DioClient {
           'chronic_conditions': ?chronicConditions,
           'blood_type': ?bloodType,
           'emergency_notes': ?emergencyNotes,
-          if (updatedBy != null && updatedBy.isNotEmpty) 'updated_by': updatedBy,
+          if (updatedBy != null && updatedBy.isNotEmpty)
+            'updated_by': updatedBy,
         },
       );
       final raw = (res.data ?? const {})['medical_vault'];
@@ -2608,8 +2643,9 @@ class DioClient {
       throw Exception('Prescription unavailable in offline mode');
     }
     try {
-      final res =
-          await _dio.get<Map<String, dynamic>>('/api/prescriptions/$id');
+      final res = await _dio.get<Map<String, dynamic>>(
+        '/api/prescriptions/$id',
+      );
       final body = res.data ?? const <String, dynamic>{};
       final raw = body['prescription'];
       if (raw is Map) {
@@ -2905,7 +2941,8 @@ class DioClient {
         queryParameters: {'doctor_id': doctorId},
       );
       return ProfileCompletionStatus.fromResponse(
-          res.data ?? const <String, dynamic>{});
+        res.data ?? const <String, dynamic>{},
+      );
     } on DioException catch (e) {
       throw _handleError(e);
     }
@@ -2939,7 +2976,8 @@ class DioClient {
         },
       );
       return ProfileCompletionStatus.fromResponse(
-          res.data ?? const <String, dynamic>{});
+        res.data ?? const <String, dynamic>{},
+      );
     } on DioException catch (e) {
       throw _handleError(e);
     }
@@ -2991,7 +3029,8 @@ class DioClient {
         },
       );
       return ProfileCompletionStatus.fromResponse(
-          res.data ?? const <String, dynamic>{});
+        res.data ?? const <String, dynamic>{},
+      );
     } on DioException catch (e) {
       throw _handleError(e);
     }
@@ -3077,8 +3116,10 @@ class DioClient {
       return;
     }
     try {
-      await _dio.patch('/doctor/services/$serviceId/status',
-          data: {'status': status});
+      await _dio.patch(
+        '/doctor/services/$serviceId/status',
+        data: {'status': status},
+      );
     } on DioException catch (e) {
       throw _handleError(e);
     }
@@ -3310,40 +3351,352 @@ class DioClient {
     );
 
     _mockActivityFeed = [
-      ActivityEvent(id: 'ev1', message: 'Dr. Nafisa reached Rumi Ahmed\'s home (MT-4827)', timestamp: now.subtract(const Duration(minutes: 3)), eventType: ActivityEventType.arrival, requestId: 'MT-4827'),
-      ActivityEvent(id: 'ev2', message: 'Dr. Kamrul assigned to MT-4830 (Wound dressing)', timestamp: now.subtract(const Duration(minutes: 8)), eventType: ActivityEventType.assignment, requestId: 'MT-4830'),
-      ActivityEvent(id: 'ev3', message: 'Emergency request from Mirpur — MT-4835', timestamp: now.subtract(const Duration(minutes: 14)), eventType: ActivityEventType.emergency, requestId: 'MT-4835'),
-      ActivityEvent(id: 'ev4', message: 'Service MT-4820 completed — Dr. Sumaiya', timestamp: now.subtract(const Duration(minutes: 22)), eventType: ActivityEventType.completion, requestId: 'MT-4820'),
-      ActivityEvent(id: 'ev5', message: 'New request MT-4831 pending review', timestamp: now.subtract(const Duration(minutes: 31)), eventType: ActivityEventType.system, requestId: 'MT-4831'),
-      ActivityEvent(id: 'ev6', message: 'Dr. Anika went online — Gulshan area', timestamp: now.subtract(const Duration(minutes: 45)), eventType: ActivityEventType.system),
-      ActivityEvent(id: 'ev7', message: 'Dr. Shafiq completed MT-4818 — Mirpur', timestamp: now.subtract(const Duration(hours: 1, minutes: 10)), eventType: ActivityEventType.completion, requestId: 'MT-4818'),
-      ActivityEvent(id: 'ev8', message: 'System: 3 new requests overnight', timestamp: now.subtract(const Duration(hours: 2)), eventType: ActivityEventType.system),
+      ActivityEvent(
+        id: 'ev1',
+        message: 'Dr. Nafisa reached Rumi Ahmed\'s home (MT-4827)',
+        timestamp: now.subtract(const Duration(minutes: 3)),
+        eventType: ActivityEventType.arrival,
+        requestId: 'MT-4827',
+      ),
+      ActivityEvent(
+        id: 'ev2',
+        message: 'Dr. Kamrul assigned to MT-4830 (Wound dressing)',
+        timestamp: now.subtract(const Duration(minutes: 8)),
+        eventType: ActivityEventType.assignment,
+        requestId: 'MT-4830',
+      ),
+      ActivityEvent(
+        id: 'ev3',
+        message: 'Emergency request from Mirpur — MT-4835',
+        timestamp: now.subtract(const Duration(minutes: 14)),
+        eventType: ActivityEventType.emergency,
+        requestId: 'MT-4835',
+      ),
+      ActivityEvent(
+        id: 'ev4',
+        message: 'Service MT-4820 completed — Dr. Sumaiya',
+        timestamp: now.subtract(const Duration(minutes: 22)),
+        eventType: ActivityEventType.completion,
+        requestId: 'MT-4820',
+      ),
+      ActivityEvent(
+        id: 'ev5',
+        message: 'New request MT-4831 pending review',
+        timestamp: now.subtract(const Duration(minutes: 31)),
+        eventType: ActivityEventType.system,
+        requestId: 'MT-4831',
+      ),
+      ActivityEvent(
+        id: 'ev6',
+        message: 'Dr. Anika went online — Gulshan area',
+        timestamp: now.subtract(const Duration(minutes: 45)),
+        eventType: ActivityEventType.system,
+      ),
+      ActivityEvent(
+        id: 'ev7',
+        message: 'Dr. Shafiq completed MT-4818 — Mirpur',
+        timestamp: now.subtract(const Duration(hours: 1, minutes: 10)),
+        eventType: ActivityEventType.completion,
+        requestId: 'MT-4818',
+      ),
+      ActivityEvent(
+        id: 'ev8',
+        message: 'System: 3 new requests overnight',
+        timestamp: now.subtract(const Duration(hours: 2)),
+        eventType: ActivityEventType.system,
+      ),
     ];
 
     _mockAdminRequests = [
-      AdminCareRequest(id: 'MT-4827', patientId: 'p001', patientName: 'Rumi Ahmed', patientAge: 62, patientGender: 'F', serviceType: ServiceType.postSurgery, serviceName: 'Post-surgery care', location: 'House 42, Rd 11A, Dhanmondi', area: 'Dhanmondi', latitude: 23.7465, longitude: 90.3760, durationHours: 2, asap: false, scheduledTime: now.add(const Duration(hours: 1)), status: 'pending', createdAt: now.subtract(const Duration(minutes: 4)), urgencyLevel: UrgencyLevel.medium, surgeryDetails: 'Gallbladder removal — Day 3 post-op', patientHistory: 'Type 2 diabetes, hypertension. Gallbladder surgery on Saturday.', patientOffer: 3500, adjustedPrice: 3500, marketPriceMin: 3200, marketPriceMax: 4500, notes: 'Needs wound dressing change and mobility help.', phone: '+880 17XX-XXXX21'),
-      AdminCareRequest(id: 'MT-4830', patientId: 'p002', patientName: 'Hasan Ali', patientAge: 68, patientGender: 'M', serviceType: ServiceType.woundDressing, serviceName: 'Wound dressing', location: 'Apt 8C, Gulshan 2', area: 'Gulshan', durationHours: 1, status: 'pending', createdAt: now.subtract(const Duration(minutes: 11)), urgencyLevel: UrgencyLevel.high, surgeryDetails: 'Knee replacement — Day 7', patientHistory: 'Chronic arthritis, post-knee-replacement.', patientOffer: 1000, adjustedPrice: 1200, marketPriceMin: 1000, marketPriceMax: 1800, notes: 'Wound infection risk — needs urgent attention.', phone: '+880 18XX-XXXX05'),
-      AdminCareRequest(id: 'MT-4829', patientId: 'p003', patientName: 'Tania Akter', patientAge: 34, patientGender: 'F', serviceType: ServiceType.vitalsCheck, serviceName: 'Post-op vitals', location: 'Sector 7, Uttara', area: 'Uttara', durationHours: 1, status: 'pending', createdAt: now.subtract(const Duration(minutes: 18)), urgencyLevel: UrgencyLevel.low, patientOffer: 800, adjustedPrice: 900, marketPriceMin: 700, marketPriceMax: 1200, phone: '+880 19XX-XXXX12'),
-      AdminCareRequest(id: 'MT-4828', patientId: 'p004', patientName: 'Md. Reza', patientAge: 55, patientGender: 'M', serviceType: ServiceType.postSurgery, serviceName: 'Post-surgery care', location: 'Block C, Mirpur 10', area: 'Mirpur', durationHours: 3, status: 'pending', createdAt: now.subtract(const Duration(minutes: 22)), urgencyLevel: UrgencyLevel.high, surgeryDetails: 'Appendectomy — Day 2', patientHistory: 'No major comorbidities.', patientOffer: 2800, adjustedPrice: 3200, marketPriceMin: 2800, marketPriceMax: 4000, notes: 'Diabetic - monitor blood sugar.', phone: '+880 17XX-XXXX33'),
-      AdminCareRequest(id: 'MT-4835', patientId: 'p009', patientName: 'Farhan Kabir', patientAge: 45, patientGender: 'M', serviceType: ServiceType.postSurgery, serviceName: 'Post-surgery care', location: 'Pallabi, Mirpur', area: 'Mirpur', durationHours: 2, asap: true, status: 'pending', createdAt: now.subtract(const Duration(minutes: 14)), urgencyLevel: UrgencyLevel.critical, surgeryDetails: 'Heart bypass — Day 5', patientHistory: 'Cardiac patient, high-risk.', patientOffer: 5000, adjustedPrice: 5500, marketPriceMin: 4500, marketPriceMax: 7000, notes: 'EMERGENCY — chest pain reported.', phone: '+880 16XX-XXXX44'),
-      AdminCareRequest(id: 'MT-4831', patientId: 'p005', patientName: 'Nusrat Jahan', patientAge: 41, patientGender: 'F', serviceType: ServiceType.postSurgery, serviceName: 'Post-surgery care', location: 'Rd 27, Banani', area: 'Banani', durationHours: 2, status: 'pending', createdAt: now.subtract(const Duration(minutes: 31)), urgencyLevel: UrgencyLevel.medium, patientOffer: 4200, adjustedPrice: 4200, marketPriceMin: 3800, marketPriceMax: 5000, phone: '+880 18XX-XXXX07'),
-      AdminCareRequest(id: 'MT-4832', patientId: 'p006', patientName: 'Rafiq Uddin', patientAge: 70, patientGender: 'M', serviceType: ServiceType.elderlyCare, serviceName: 'Elderly care', location: 'Mohammadpur', area: 'Mohammadpur', durationHours: 4, status: 'pending', createdAt: now.subtract(const Duration(minutes: 38)), urgencyLevel: UrgencyLevel.medium, patientOffer: 3000, adjustedPrice: 3200, marketPriceMin: 2500, marketPriceMax: 4000, phone: '+880 17XX-XXXX55'),
-      AdminCareRequest(id: 'MT-4826', patientId: 'p007', patientName: 'Nusrat J.', patientAge: 41, patientGender: 'F', serviceType: ServiceType.postSurgery, serviceName: 'Post-surgery care', location: 'Banani DOHS', area: 'Banani', durationHours: 2, status: 'approved', createdAt: now.subtract(const Duration(minutes: 34)), assignedDoctorId: 'doc_001', assignedDoctorName: 'Dr. Nafisa Rahman', patientOffer: 4200, adjustedPrice: 4200, marketPriceMin: 3800, marketPriceMax: 5000),
-      AdminCareRequest(id: 'MT-4825', patientId: 'p008', patientName: 'Karim U.', patientAge: 72, patientGender: 'M', serviceType: ServiceType.woundDressing, serviceName: 'Wound dressing', location: 'Dhanmondi 15', area: 'Dhanmondi', durationHours: 1, status: 'approved', createdAt: now.subtract(const Duration(minutes: 41)), assignedDoctorId: 'doc_002', assignedDoctorName: 'Dr. Kamrul Hasan', patientOffer: 1100, adjustedPrice: 1100, marketPriceMin: 900, marketPriceMax: 1500),
+      AdminCareRequest(
+        id: 'MT-4827',
+        patientId: 'p001',
+        patientName: 'Rumi Ahmed',
+        patientAge: 62,
+        patientGender: 'F',
+        serviceType: ServiceType.postSurgery,
+        serviceName: 'Post-surgery care',
+        location: 'House 42, Rd 11A, Dhanmondi',
+        area: 'Dhanmondi',
+        latitude: 23.7465,
+        longitude: 90.3760,
+        durationHours: 2,
+        asap: false,
+        scheduledTime: now.add(const Duration(hours: 1)),
+        status: 'pending',
+        createdAt: now.subtract(const Duration(minutes: 4)),
+        urgencyLevel: UrgencyLevel.medium,
+        surgeryDetails: 'Gallbladder removal — Day 3 post-op',
+        patientHistory:
+            'Type 2 diabetes, hypertension. Gallbladder surgery on Saturday.',
+        patientOffer: 3500,
+        adjustedPrice: 3500,
+        marketPriceMin: 3200,
+        marketPriceMax: 4500,
+        notes: 'Needs wound dressing change and mobility help.',
+        phone: '+880 17XX-XXXX21',
+      ),
+      AdminCareRequest(
+        id: 'MT-4830',
+        patientId: 'p002',
+        patientName: 'Hasan Ali',
+        patientAge: 68,
+        patientGender: 'M',
+        serviceType: ServiceType.woundDressing,
+        serviceName: 'Wound dressing',
+        location: 'Apt 8C, Gulshan 2',
+        area: 'Gulshan',
+        durationHours: 1,
+        status: 'pending',
+        createdAt: now.subtract(const Duration(minutes: 11)),
+        urgencyLevel: UrgencyLevel.high,
+        surgeryDetails: 'Knee replacement — Day 7',
+        patientHistory: 'Chronic arthritis, post-knee-replacement.',
+        patientOffer: 1000,
+        adjustedPrice: 1200,
+        marketPriceMin: 1000,
+        marketPriceMax: 1800,
+        notes: 'Wound infection risk — needs urgent attention.',
+        phone: '+880 18XX-XXXX05',
+      ),
+      AdminCareRequest(
+        id: 'MT-4829',
+        patientId: 'p003',
+        patientName: 'Tania Akter',
+        patientAge: 34,
+        patientGender: 'F',
+        serviceType: ServiceType.vitalsCheck,
+        serviceName: 'Post-op vitals',
+        location: 'Sector 7, Uttara',
+        area: 'Uttara',
+        durationHours: 1,
+        status: 'pending',
+        createdAt: now.subtract(const Duration(minutes: 18)),
+        urgencyLevel: UrgencyLevel.low,
+        patientOffer: 800,
+        adjustedPrice: 900,
+        marketPriceMin: 700,
+        marketPriceMax: 1200,
+        phone: '+880 19XX-XXXX12',
+      ),
+      AdminCareRequest(
+        id: 'MT-4828',
+        patientId: 'p004',
+        patientName: 'Md. Reza',
+        patientAge: 55,
+        patientGender: 'M',
+        serviceType: ServiceType.postSurgery,
+        serviceName: 'Post-surgery care',
+        location: 'Block C, Mirpur 10',
+        area: 'Mirpur',
+        durationHours: 3,
+        status: 'pending',
+        createdAt: now.subtract(const Duration(minutes: 22)),
+        urgencyLevel: UrgencyLevel.high,
+        surgeryDetails: 'Appendectomy — Day 2',
+        patientHistory: 'No major comorbidities.',
+        patientOffer: 2800,
+        adjustedPrice: 3200,
+        marketPriceMin: 2800,
+        marketPriceMax: 4000,
+        notes: 'Diabetic - monitor blood sugar.',
+        phone: '+880 17XX-XXXX33',
+      ),
+      AdminCareRequest(
+        id: 'MT-4835',
+        patientId: 'p009',
+        patientName: 'Farhan Kabir',
+        patientAge: 45,
+        patientGender: 'M',
+        serviceType: ServiceType.postSurgery,
+        serviceName: 'Post-surgery care',
+        location: 'Pallabi, Mirpur',
+        area: 'Mirpur',
+        durationHours: 2,
+        asap: true,
+        status: 'pending',
+        createdAt: now.subtract(const Duration(minutes: 14)),
+        urgencyLevel: UrgencyLevel.critical,
+        surgeryDetails: 'Heart bypass — Day 5',
+        patientHistory: 'Cardiac patient, high-risk.',
+        patientOffer: 5000,
+        adjustedPrice: 5500,
+        marketPriceMin: 4500,
+        marketPriceMax: 7000,
+        notes: 'EMERGENCY — chest pain reported.',
+        phone: '+880 16XX-XXXX44',
+      ),
+      AdminCareRequest(
+        id: 'MT-4831',
+        patientId: 'p005',
+        patientName: 'Nusrat Jahan',
+        patientAge: 41,
+        patientGender: 'F',
+        serviceType: ServiceType.postSurgery,
+        serviceName: 'Post-surgery care',
+        location: 'Rd 27, Banani',
+        area: 'Banani',
+        durationHours: 2,
+        status: 'pending',
+        createdAt: now.subtract(const Duration(minutes: 31)),
+        urgencyLevel: UrgencyLevel.medium,
+        patientOffer: 4200,
+        adjustedPrice: 4200,
+        marketPriceMin: 3800,
+        marketPriceMax: 5000,
+        phone: '+880 18XX-XXXX07',
+      ),
+      AdminCareRequest(
+        id: 'MT-4832',
+        patientId: 'p006',
+        patientName: 'Rafiq Uddin',
+        patientAge: 70,
+        patientGender: 'M',
+        serviceType: ServiceType.elderlyCare,
+        serviceName: 'Elderly care',
+        location: 'Mohammadpur',
+        area: 'Mohammadpur',
+        durationHours: 4,
+        status: 'pending',
+        createdAt: now.subtract(const Duration(minutes: 38)),
+        urgencyLevel: UrgencyLevel.medium,
+        patientOffer: 3000,
+        adjustedPrice: 3200,
+        marketPriceMin: 2500,
+        marketPriceMax: 4000,
+        phone: '+880 17XX-XXXX55',
+      ),
+      AdminCareRequest(
+        id: 'MT-4826',
+        patientId: 'p007',
+        patientName: 'Nusrat J.',
+        patientAge: 41,
+        patientGender: 'F',
+        serviceType: ServiceType.postSurgery,
+        serviceName: 'Post-surgery care',
+        location: 'Banani DOHS',
+        area: 'Banani',
+        durationHours: 2,
+        status: 'approved',
+        createdAt: now.subtract(const Duration(minutes: 34)),
+        assignedDoctorId: 'doc_001',
+        assignedDoctorName: 'Dr. Nafisa Rahman',
+        patientOffer: 4200,
+        adjustedPrice: 4200,
+        marketPriceMin: 3800,
+        marketPriceMax: 5000,
+      ),
+      AdminCareRequest(
+        id: 'MT-4825',
+        patientId: 'p008',
+        patientName: 'Karim U.',
+        patientAge: 72,
+        patientGender: 'M',
+        serviceType: ServiceType.woundDressing,
+        serviceName: 'Wound dressing',
+        location: 'Dhanmondi 15',
+        area: 'Dhanmondi',
+        durationHours: 1,
+        status: 'approved',
+        createdAt: now.subtract(const Duration(minutes: 41)),
+        assignedDoctorId: 'doc_002',
+        assignedDoctorName: 'Dr. Kamrul Hasan',
+        patientOffer: 1100,
+        adjustedPrice: 1100,
+        marketPriceMin: 900,
+        marketPriceMax: 1500,
+      ),
     ];
 
     _mockDoctors = [
-      AvailableDoctor(id: 'doc_001', name: 'Dr. Nafisa Rahman', specialization: 'General Surgery', yearsExperience: 8, rating: 4.93, reviewCount: 127, distanceKm: 3.4, fee: 2400, upcomingAppointments: [TimeSlot(start: today.add(const Duration(hours: 17)), end: today.add(const Duration(hours: 18)), label: 'Mr. Hasan Ali — Wound dressing')]),
-      AvailableDoctor(id: 'doc_002', name: 'Dr. Kamrul Hasan', specialization: 'Orthopedics', yearsExperience: 12, rating: 4.87, reviewCount: 184, distanceKm: 5.1, fee: 2600, upcomingAppointments: [TimeSlot(start: today.add(const Duration(hours: 10)), end: today.add(const Duration(hours: 12)), label: 'Scheduled surgery follow-up')]),
-      AvailableDoctor(id: 'doc_003', name: 'Dr. Anika Chowdhury', specialization: 'Internal Medicine', yearsExperience: 6, rating: 4.81, reviewCount: 92, distanceKm: 6.8, fee: 2200),
-      AvailableDoctor(id: 'doc_004', name: 'Dr. Shafiq Islam', specialization: 'General Surgery', yearsExperience: 10, rating: 4.76, reviewCount: 156, distanceKm: 8.2, fee: 2500),
-      AvailableDoctor(id: 'doc_005', name: 'Dr. Sumaiya Akter', specialization: 'Internal Medicine', yearsExperience: 6, rating: 4.72, reviewCount: 92, distanceKm: 9.5, fee: 2100),
+      AvailableDoctor(
+        id: 'doc_001',
+        name: 'Dr. Nafisa Rahman',
+        specialization: 'General Surgery',
+        yearsExperience: 8,
+        rating: 4.93,
+        reviewCount: 127,
+        distanceKm: 3.4,
+        fee: 2400,
+        upcomingAppointments: [
+          TimeSlot(
+            start: today.add(const Duration(hours: 17)),
+            end: today.add(const Duration(hours: 18)),
+            label: 'Mr. Hasan Ali — Wound dressing',
+          ),
+        ],
+      ),
+      AvailableDoctor(
+        id: 'doc_002',
+        name: 'Dr. Kamrul Hasan',
+        specialization: 'Orthopedics',
+        yearsExperience: 12,
+        rating: 4.87,
+        reviewCount: 184,
+        distanceKm: 5.1,
+        fee: 2600,
+        upcomingAppointments: [
+          TimeSlot(
+            start: today.add(const Duration(hours: 10)),
+            end: today.add(const Duration(hours: 12)),
+            label: 'Scheduled surgery follow-up',
+          ),
+        ],
+      ),
+      AvailableDoctor(
+        id: 'doc_003',
+        name: 'Dr. Anika Chowdhury',
+        specialization: 'Internal Medicine',
+        yearsExperience: 6,
+        rating: 4.81,
+        reviewCount: 92,
+        distanceKm: 6.8,
+        fee: 2200,
+      ),
+      AvailableDoctor(
+        id: 'doc_004',
+        name: 'Dr. Shafiq Islam',
+        specialization: 'General Surgery',
+        yearsExperience: 10,
+        rating: 4.76,
+        reviewCount: 156,
+        distanceKm: 8.2,
+        fee: 2500,
+      ),
+      AvailableDoctor(
+        id: 'doc_005',
+        name: 'Dr. Sumaiya Akter',
+        specialization: 'Internal Medicine',
+        yearsExperience: 6,
+        rating: 4.72,
+        reviewCount: 92,
+        distanceKm: 9.5,
+        fee: 2100,
+      ),
     ];
 
     _mockHelpers = [
-      const AvailableHelper(id: 'hlp_001', name: 'Shahana Begum', specialty: 'Nursing aide', yearsExperience: 5, fee: 900),
-      const AvailableHelper(id: 'hlp_002', name: 'Rina Khatun', specialty: 'Nursing aide', yearsExperience: 3, fee: 800),
-      const AvailableHelper(id: 'hlp_003', name: 'Fatema Akter', specialty: 'Patient care', yearsExperience: 4, fee: 850),
+      const AvailableHelper(
+        id: 'hlp_001',
+        name: 'Shahana Begum',
+        specialty: 'Nursing aide',
+        yearsExperience: 5,
+        fee: 900,
+      ),
+      const AvailableHelper(
+        id: 'hlp_002',
+        name: 'Rina Khatun',
+        specialty: 'Nursing aide',
+        yearsExperience: 3,
+        fee: 800,
+      ),
+      const AvailableHelper(
+        id: 'hlp_003',
+        name: 'Fatema Akter',
+        specialty: 'Patient care',
+        yearsExperience: 4,
+        fee: 850,
+      ),
     ];
 
     _mockLiveServices = [
@@ -3411,8 +3764,9 @@ class DioClient {
           s.copyWith(
             elapsedMinutes: (s.elapsedMinutes + ((rng + s.id.hashCode) % 2))
                 .clamp(0, s.totalMinutes + 10),
-            progressPercent:
-                s.status == LiveServiceStatus.arrived ? 0 : s.progressPercent,
+            progressPercent: s.status == LiveServiceStatus.arrived
+                ? 0
+                : s.progressPercent,
           ),
       ];
       return List.unmodifiable(_mockLiveServices);
@@ -3420,19 +3774,20 @@ class DioClient {
     try {
       final response = await _dio.get('/api/admin/live-services');
       return (response.data as List)
-          .map((e) => LiveServiceUpdate(
-                id: (e['id'] ?? '').toString(),
-                patientName: (e['patientName'] ?? '').toString(),
-                doctorName: (e['doctorName'] ?? '').toString(),
-                area: (e['area'] ?? '').toString(),
-                status: _parseLiveStatus(e['status']?.toString()),
-                progressPercent:
-                    ((e['progressPercent'] as num?) ?? 0).toDouble(),
-                elapsedMinutes: (e['elapsedMinutes'] as int?) ?? 0,
-                totalMinutes: (e['totalMinutes'] as int?) ?? 0,
-                latitude: (e['latitude'] as num?)?.toDouble(),
-                longitude: (e['longitude'] as num?)?.toDouble(),
-              ))
+          .map(
+            (e) => LiveServiceUpdate(
+              id: (e['id'] ?? '').toString(),
+              patientName: (e['patientName'] ?? '').toString(),
+              doctorName: (e['doctorName'] ?? '').toString(),
+              area: (e['area'] ?? '').toString(),
+              status: _parseLiveStatus(e['status']?.toString()),
+              progressPercent: ((e['progressPercent'] as num?) ?? 0).toDouble(),
+              elapsedMinutes: (e['elapsedMinutes'] as int?) ?? 0,
+              totalMinutes: (e['totalMinutes'] as int?) ?? 0,
+              latitude: (e['latitude'] as num?)?.toDouble(),
+              longitude: (e['longitude'] as num?)?.toDouble(),
+            ),
+          )
           .toList();
     } on DioException catch (e) {
       throw _handleError(e);
@@ -3461,16 +3816,18 @@ class DioClient {
       await Future.delayed(const Duration(milliseconds: 200));
       // Mock seven days of plausible approved/declined values so the
       // offline-demo dashboard still draws a believable chart.
-      return AdminChartData(series: [
-        for (var i = 0; i < 7; i++)
-          AdminChartPoint(
-            date: '2026-05-${(24 + i).toString().padLeft(2, '0')}',
-            label: const ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][i],
-            approved: [4, 7, 6, 8, 7, 10, 9][i],
-            declined: [1, 3, 1, 2, 2, 3, 2][i],
-            total: [5, 10, 7, 10, 9, 13, 11][i],
-          ),
-      ]);
+      return AdminChartData(
+        series: [
+          for (var i = 0; i < 7; i++)
+            AdminChartPoint(
+              date: '2026-05-${(24 + i).toString().padLeft(2, '0')}',
+              label: const ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'][i],
+              approved: [4, 7, 6, 8, 7, 10, 9][i],
+              declined: [1, 3, 1, 2, 2, 3, 2][i],
+              total: [5, 10, 7, 10, 9, 13, 11][i],
+            ),
+        ],
+      );
     }
     try {
       final res = await _dio.get<Map<String, dynamic>>('/admin/chart-data');
@@ -3586,15 +3943,18 @@ class DioClient {
     if (_useMockMode) {
       await Future.delayed(const Duration(milliseconds: 200));
       _ensureAdminMockSeeded();
-      return _mockAdminRequests.where((r) {
-        if (r.status != 'completed') return false;
-        if (startDate != null && r.createdAt.isBefore(startDate)) return false;
-        if (endDate != null &&
-            r.createdAt.isAfter(endDate.add(const Duration(days: 1)))) {
-          return false;
-        }
-        return true;
-      }).toList(growable: false);
+      return _mockAdminRequests
+          .where((r) {
+            if (r.status != 'completed') return false;
+            if (startDate != null && r.createdAt.isBefore(startDate))
+              return false;
+            if (endDate != null &&
+                r.createdAt.isAfter(endDate.add(const Duration(days: 1)))) {
+              return false;
+            }
+            return true;
+          })
+          .toList(growable: false);
     }
     try {
       final res = await _dio.get<List<dynamic>>(
@@ -3608,8 +3968,9 @@ class DioClient {
       final out = <AdminCareRequest>[];
       for (final e in list) {
         try {
-          out.add(adminCareRequestFromMongo(
-              Map<String, dynamic>.from(e as Map)));
+          out.add(
+            adminCareRequestFromMongo(Map<String, dynamic>.from(e as Map)),
+          );
         } catch (err) {
           assert(() {
             debugPrint('[admin] skipped unparseable billing row: $err');
@@ -3664,11 +4025,13 @@ class DioClient {
       final list = await getAdminProviders();
       final match = list.where((p) => p.id == providerId);
       final base = match.isEmpty ? null : match.first;
-      return (base ?? const DoctorProfile(id: '', fullName: '', email: '', phone: ''))
+      return (base ??
+              const DoctorProfile(id: '', fullName: '', email: '', phone: ''))
           .copyWith(
-        verificationStatus:
-            (base?.verificationStatus == 'verified') ? 'pending' : 'verified',
-      );
+            verificationStatus: (base?.verificationStatus == 'verified')
+                ? 'pending'
+                : 'verified',
+          );
     }
     try {
       final res = await _dio.patch<Map<String, dynamic>>(
@@ -3742,8 +4105,9 @@ class DioClient {
       );
     }
     try {
-      final res =
-          await _dio.get<Map<String, dynamic>>('/api/admin/finance/cash-in-hand');
+      final res = await _dio.get<Map<String, dynamic>>(
+        '/api/admin/finance/cash-in-hand',
+      );
       return CashInHandSummary.fromJson(res.data ?? const {});
     } on DioException catch (e) {
       throw _handleError(e);
@@ -3883,8 +4247,7 @@ class DioClient {
       return AdminSettings.empty;
     }
     try {
-      final res =
-          await _dio.get<Map<String, dynamic>>('/api/admin/settings');
+      final res = await _dio.get<Map<String, dynamic>>('/api/admin/settings');
       final raw = res.data?['settings'];
       return AdminSettings.fromJson(
         raw is Map ? Map<String, dynamic>.from(raw) : const {},
@@ -3923,7 +4286,9 @@ class DioClient {
     }
     try {
       final response = await _dio.get('/admin/activity');
-      return (response.data as List).map((e) => ActivityEvent.fromJson(e as Map<String, dynamic>)).toList();
+      return (response.data as List)
+          .map((e) => ActivityEvent.fromJson(e as Map<String, dynamic>))
+          .toList();
     } on DioException catch (e) {
       throw _handleError(e);
     }
@@ -3948,7 +4313,9 @@ class DioClient {
       final out = <AdminCareRequest>[];
       for (final e in list) {
         try {
-          out.add(adminCareRequestFromMongo(Map<String, dynamic>.from(e as Map)));
+          out.add(
+            adminCareRequestFromMongo(Map<String, dynamic>.from(e as Map)),
+          );
         } catch (err) {
           assert(() {
             debugPrint('[admin] skipped unparseable care_request: $err');
@@ -3969,14 +4336,17 @@ class DioClient {
       return List.unmodifiable(_mockDoctors);
     }
     try {
-      final response =
-          await _dio.get<List<dynamic>>('/admin/requests/$requestId/doctors');
+      final response = await _dio.get<List<dynamic>>(
+        '/admin/requests/$requestId/doctors',
+      );
       final list = response.data ?? const [];
       // `providers` collection docs (snake_case, full_name, availability_status)
       // enriched server-side with per-request match metadata.
       return list
-          .map((e) =>
-              providerToDoctorFromMongo(Map<String, dynamic>.from(e as Map)))
+          .map(
+            (e) =>
+                providerToDoctorFromMongo(Map<String, dynamic>.from(e as Map)),
+          )
           .toList(growable: false);
     } on DioException catch (e) {
       throw _handleError(e);
@@ -3986,12 +4356,15 @@ class DioClient {
   /// `GET /admin/requests/:id/nurses` — verified + online nurses.
   Future<List<AvailableNurse>> getAvailableNurses(String requestId) async {
     try {
-      final response =
-          await _dio.get<List<dynamic>>('/admin/requests/$requestId/nurses');
+      final response = await _dio.get<List<dynamic>>(
+        '/admin/requests/$requestId/nurses',
+      );
       final list = response.data ?? const [];
       return list
-          .map((e) =>
-              providerToNurseFromMongo(Map<String, dynamic>.from(e as Map)))
+          .map(
+            (e) =>
+                providerToNurseFromMongo(Map<String, dynamic>.from(e as Map)),
+          )
           .toList(growable: false);
     } on DioException catch (e) {
       throw _handleError(e);
@@ -4042,12 +4415,15 @@ class DioClient {
       return List.unmodifiable(_mockHelpers);
     }
     try {
-      final response =
-          await _dio.get<List<dynamic>>('/admin/requests/$requestId/helpers');
+      final response = await _dio.get<List<dynamic>>(
+        '/admin/requests/$requestId/helpers',
+      );
       final list = response.data ?? const [];
       return list
-          .map((e) =>
-              providerToHelperFromMongo(Map<String, dynamic>.from(e as Map)))
+          .map(
+            (e) =>
+                providerToHelperFromMongo(Map<String, dynamic>.from(e as Map)),
+          )
           .toList(growable: false);
     } on DioException catch (e) {
       throw _handleError(e);
@@ -4122,15 +4498,18 @@ class DioClient {
       // camelCase caused the "doctor_id is required" 400.)
       // Null-aware map entries (`?value`) omit the key entirely if the
       // value is null, so the backend doesn't see `"helper_id": null`.
-      await _dio.post('/admin/requests/$requestId/assign', data: {
-        'doctor_id': ?doctorId,
-        'doctor_name': ?doctorName,
-        'nurse_id': ?nurseId,
-        'nurse_name': ?nurseName,
-        'helper_id': ?helperId,
-        'helper_name': ?helperName,
-        'final_price': ?finalPrice,
-      });
+      await _dio.post(
+        '/admin/requests/$requestId/assign',
+        data: {
+          'doctor_id': ?doctorId,
+          'doctor_name': ?doctorName,
+          'nurse_id': ?nurseId,
+          'nurse_name': ?nurseName,
+          'helper_id': ?helperId,
+          'helper_name': ?helperName,
+          'final_price': ?finalPrice,
+        },
+      );
     } on DioException catch (e) {
       throw _handleError(e);
     }
@@ -4143,16 +4522,18 @@ class DioClient {
       for (final id in ids) {
         final idx = _mockAdminRequests.indexWhere((r) => r.id == id);
         if (idx != -1) {
-          _mockAdminRequests[idx] = _mockAdminRequests[idx].copyWith(status: status);
+          _mockAdminRequests[idx] = _mockAdminRequests[idx].copyWith(
+            status: status,
+          );
         }
       }
       return;
     }
     try {
-      await _dio.post('/admin/requests/bulk-status', data: {
-        'ids': ids,
-        'status': status,
-      });
+      await _dio.post(
+        '/admin/requests/bulk-status',
+        data: {'ids': ids, 'status': status},
+      );
     } on DioException catch (e) {
       throw _handleError(e);
     }
@@ -4195,8 +4576,9 @@ class DioClient {
 
     // Diagnostic line — visible in `flutter run`'s VS Code Debug Console.
     debugPrint(
-        '⚠️  [DioClient] ${type.name} on $url'
-        '${status == null ? '' : ' (status=$status)'} :: ${error.message}');
+      '⚠️  [DioClient] ${type.name} on $url'
+      '${status == null ? '' : ' (status=$status)'} :: ${error.message}',
+    );
 
     // 1. Server returned a structured error → trust its `message` verbatim.
     // We used to override 401s with a hardcoded "Invalid email or password"
@@ -4214,7 +4596,8 @@ class DioClient {
       return 'Incorrect mobile number or password. Please try again.';
     }
     if (status == 403) return 'Account is inactive or not allowed.';
-    if (status == 404) return 'Server endpoint not found (${error.requestOptions.path}).';
+    if (status == 404)
+      return 'Server endpoint not found (${error.requestOptions.path}).';
     if (status != null && status >= 500) {
       return 'Server error ($status). Check the backend logs.';
     }

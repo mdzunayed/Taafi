@@ -4,7 +4,11 @@ import '../theme/mt_text_styles.dart';
 
 class MtButton extends StatelessWidget {
   final String label;
-  final VoidCallback onPressed;
+
+  /// `null` disables the button (both variants already render a disabled
+  /// state, since `isLoading` nulls this out on the way to the child button).
+  /// Still `required` so callers stay explicit about the intent.
+  final VoidCallback? onPressed;
   final bool isLoading;
   final IconData? leadingIcon;
   final double? width;

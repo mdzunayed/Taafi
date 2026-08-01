@@ -7,6 +7,7 @@ import '../../features/auth/auth_provider.dart';
 import '../models/patient_active_request.dart';
 import '../models/patient_home_feed.dart';
 import '../models/patient_notification.dart';
+import '../network/socket_manager.dart';
 import 'dio_client.dart';
 
 /// Cadence at which the patient pulls `GET /patient/home` so the Tracking
@@ -64,10 +65,20 @@ class PatientHomeFeedController extends AsyncNotifier<PatientHomeFeed> {
       return PatientHomeFeed.empty();
     }
 
+    // Live milestone pushes. When an admin advances the booking (or edits the
+    // appointment time) the backend emits `booking:status_updated` to this
+    // patient's room — pull immediately so the ONGOING CARE card's step bar
+    // and time pill move at once instead of waiting out the 10 s poll.
+    final socket = ref.watch(socketManagerProvider);
+    final milestoneSub = socket?.onBookingStatusUpdated.listen((_) {
+      _silentDiffPull();
+    });
+    ref.onDispose(() => milestoneSub?.cancel());
+
     // Heartbeat — pulls `GET /patient/home` every 10 s and only writes
     // state when the active request's status / id / provider has actually
-    // changed. This is what makes the Tracking timeline advance the
-    // moment the doctor flips status on the other side.
+    // changed. This is the fallback that keeps the timeline advancing when
+    // the socket is down, and it also covers provider-side status flips.
     _poll = Timer.periodic(_patientPollInterval, (_) => _silentDiffPull());
     return _repo.fetchFeed();
   }
@@ -122,6 +133,14 @@ class PatientHomeFeedController extends AsyncNotifier<PatientHomeFeed> {
     if (ar.rawStatus != br.rawStatus) return false;
     if (ar.finalServiceFee != br.finalServiceFee) return false;
     if (ar.providerName != br.providerName) return false;
+    // Milestone tracker fields. An admin can reschedule the appointment or
+    // rename the provider WITHOUT moving the lifecycle status — none of the
+    // checks above would notice, and the ONGOING CARE card's time pill would
+    // sit on a stale time until the next status change.
+    if (ar.milestone != br.milestone) return false;
+    if (ar.milestoneLabel != br.milestoneLabel) return false;
+    if (ar.scheduledTime != br.scheduledTime) return false;
+    if (ar.assignedProviderName != br.assignedProviderName) return false;
     return true;
   }
 

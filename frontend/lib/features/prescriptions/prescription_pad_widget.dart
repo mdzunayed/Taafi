@@ -66,8 +66,16 @@ class PrescriptionPadWidget extends StatelessWidget {
             // Sharp divider separating credentials from the clinical body.
             Container(height: 1.5, color: Colors.black87),
             const SizedBox(height: 12),
-            if (p.patientSnapshot != null && !p.patientSnapshot!.isEmpty) ...[
-              _PatientBlock(snapshot: p.patientSnapshot!),
+            // The patient line is part of the document, not an extra for
+            // dependent bookings — it prints whenever we know who the
+            // script is for (doctor-entered name, dependent snapshot, or
+            // the account holder).
+            if (p.padPatientName.isNotEmpty ||
+                (p.patientSnapshot != null && !p.patientSnapshot!.isEmpty)) ...[
+              _PatientBlock(
+                name: p.padPatientName,
+                snapshot: p.patientSnapshot,
+              ),
               const SizedBox(height: 10),
             ],
             _VitalsBar(prescription: p),
@@ -155,41 +163,61 @@ class _Header extends StatelessWidget {
           ),
         ),
     ];
+    // Both sides are flex-bound (3:2). Leaving the brand column
+    // unconstrained let the long Bangla tagline claim its full intrinsic
+    // width and squeezed the credentials column down to a few
+    // characters — "Rahman" then broke one letter per line.
     return Row(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
         Expanded(
+          flex: 3,
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: credentialLines,
           ),
         ),
         const SizedBox(width: 12),
-        Column(
-          crossAxisAlignment: CrossAxisAlignment.end,
-          children: const [
-            Text(
-              'Taafi',
-              style: TextStyle(
-                color: _padBrand,
-                fontSize: 22,
-                fontWeight: FontWeight.w900,
-                letterSpacing: 0.5,
-                height: 1.1,
-              ),
+        Expanded(
+          flex: 2,
+          child: Align(
+            alignment: Alignment.topRight,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: const [
+                // The wordmark never wraps or clips — it shrinks instead
+                // if a narrow screen leaves it less than its natural width.
+                FittedBox(
+                  fit: BoxFit.scaleDown,
+                  alignment: Alignment.centerRight,
+                  child: Text(
+                    'Taafi',
+                    maxLines: 1,
+                    style: TextStyle(
+                      color: _padBrand,
+                      fontSize: 22,
+                      fontWeight: FontWeight.w900,
+                      letterSpacing: 0.5,
+                      height: 1.1,
+                    ),
+                  ),
+                ),
+                SizedBox(height: 2),
+                Text(
+                  kTaafiTagline,
+                  textAlign: TextAlign.right,
+                  softWrap: true,
+                  style: TextStyle(
+                    color: _padInkSoft,
+                    fontSize: 9.5,
+                    fontWeight: FontWeight.w600,
+                    letterSpacing: 0.2,
+                    height: 1.35,
+                  ),
+                ),
+              ],
             ),
-            SizedBox(height: 2),
-            Text(
-              kTaafiTagline,
-              textAlign: TextAlign.right,
-              style: TextStyle(
-                color: _padInkSoft,
-                fontSize: 9.5,
-                fontWeight: FontWeight.w600,
-                letterSpacing: 0.2,
-              ),
-            ),
-          ],
+          ),
         ),
       ],
     );
@@ -199,17 +227,26 @@ class _Header extends StatelessWidget {
 // ── Patient identity block (target patient / family-member bookings) ──
 
 class _PatientBlock extends StatelessWidget {
-  final PatientSnapshot snapshot;
-  const _PatientBlock({required this.snapshot});
+  /// Resolved display name — the doctor-entered pad name when present,
+  /// otherwise whatever the snapshot / account carries.
+  final String name;
+
+  /// Age · sex · relationship metadata; null on scripts that only know
+  /// the name.
+  final PatientSnapshot? snapshot;
+
+  const _PatientBlock({required this.name, this.snapshot});
 
   @override
   Widget build(BuildContext context) {
     final s = snapshot;
-    final meta = [
-      if (s.ageSexLine.isNotEmpty) s.ageSexLine,
-      if (s.relationship.isNotEmpty)
-        s.relationship[0].toUpperCase() + s.relationship.substring(1),
-    ].join('   ·   ');
+    final meta = s == null
+        ? ''
+        : [
+            if (s.ageSexLine.isNotEmpty) s.ageSexLine,
+            if (s.relationship.isNotEmpty)
+              s.relationship[0].toUpperCase() + s.relationship.substring(1),
+          ].join('   ·   ');
     return Row(
       crossAxisAlignment: CrossAxisAlignment.baseline,
       textBaseline: TextBaseline.alphabetic,
@@ -227,7 +264,7 @@ class _PatientBlock extends StatelessWidget {
             TextSpan(
               children: [
                 TextSpan(
-                  text: s.name,
+                  text: name.isEmpty ? (s?.name ?? '') : name,
                   style: const TextStyle(
                     color: _padInk,
                     fontSize: 12.5,
@@ -281,27 +318,31 @@ class _VitalsBar extends StatelessWidget {
         spacing: 16,
         runSpacing: 6,
         children: [
+          // One Text.rich per entry rather than a min-size Row: a long
+          // diagnosis then wraps inside the bar instead of overflowing
+          // the Wrap's fixed-width slot.
           for (final e in entries)
-            Row(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(
-                  '${e.key}: ',
-                  style: const TextStyle(
-                    color: _padInkSoft,
-                    fontSize: 10.5,
-                    fontWeight: FontWeight.w700,
+            Text.rich(
+              TextSpan(
+                children: [
+                  TextSpan(
+                    text: '${e.key}: ',
+                    style: const TextStyle(
+                      color: _padInkSoft,
+                      fontSize: 10.5,
+                      fontWeight: FontWeight.w700,
+                    ),
                   ),
-                ),
-                Text(
-                  e.value,
-                  style: const TextStyle(
-                    color: _padInk,
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
+                  TextSpan(
+                    text: e.value,
+                    style: const TextStyle(
+                      color: _padInk,
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                    ),
                   ),
-                ),
-              ],
+                ],
+              ),
             ),
         ],
       ),
@@ -345,16 +386,20 @@ class _MedicationsTable extends StatelessWidget {
     color: _padInkSoft,
     fontSize: 9.5,
     fontWeight: FontWeight.w800,
-    letterSpacing: 1.0,
+    letterSpacing: 0.5,
   );
 
   @override
   Widget build(BuildContext context) {
     return Table(
+      // The duration column sizes itself to its widest content, which is
+      // the "DURATION" header — a flex share small enough to look right
+      // on a 400dp phone was too narrow for the word and broke it into
+      // "DURATIO" / "N". Medicine and dosage then split what's left.
       columnWidths: const {
-        0: FlexColumnWidth(5),
-        1: FlexColumnWidth(3.4),
-        2: FlexColumnWidth(2.2),
+        0: FlexColumnWidth(4.6),
+        1: FlexColumnWidth(3.2),
+        2: IntrinsicColumnWidth(),
       },
       border: const TableBorder(
         top: BorderSide(color: _padLine),
@@ -365,9 +410,9 @@ class _MedicationsTable extends StatelessWidget {
       children: [
         const TableRow(
           children: [
-            _Cell(child: Text('MEDICINE', style: _headerStyle)),
-            _Cell(child: Text('DOSAGE', style: _headerStyle)),
-            _Cell(child: Text('DURATION', style: _headerStyle)),
+            _Cell(child: _HeaderLabel('MEDICINE')),
+            _Cell(child: _HeaderLabel('DOSAGE')),
+            _Cell(child: _HeaderLabel('DURATION')),
           ],
         ),
         for (var i = 0; i < items.length; i++)
@@ -452,6 +497,26 @@ class _MedicationsTable extends StatelessWidget {
       case MealContext.either:
         return 'With/Without Meal';
     }
+  }
+}
+
+/// Column heading. Scales down instead of wrapping, so "DURATION" stays
+/// one word on every screen width no matter how the flex columns settle.
+class _HeaderLabel extends StatelessWidget {
+  final String text;
+  const _HeaderLabel(this.text);
+
+  @override
+  Widget build(BuildContext context) {
+    return FittedBox(
+      fit: BoxFit.scaleDown,
+      alignment: Alignment.centerLeft,
+      child: Text(
+        text,
+        maxLines: 1,
+        style: _MedicationsTable._headerStyle,
+      ),
+    );
   }
 }
 

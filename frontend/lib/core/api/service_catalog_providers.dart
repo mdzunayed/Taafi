@@ -26,3 +26,19 @@ final allServicesProvider = StreamProvider<List<ServiceCatalogItem>>((ref) {
 final activeServicesProvider = StreamProvider<List<ServiceCatalogItem>>((ref) {
   return ref.watch(serviceCatalogRepositoryProvider).watchActive();
 });
+
+/// The ONLY correct way to re-fetch the catalog from a Retry button or a
+/// pull-to-refresh.
+///
+/// `ref.refresh(activeServicesProvider)` looks like it re-fetches but does not:
+/// the StreamProvider is rebuilt, yet its dependency
+/// ([serviceCatalogRepositoryProvider]) is not, so it re-subscribes to the same
+/// repository, which immediately replays the cached `_initialError` — the same
+/// error re-renders without a single network call. That is why the "Couldn't
+/// load / Retry" card on Home was unrecoverable: the button was inert.
+///
+/// Going through the repository issues a real GET and pushes the result onto
+/// both watched streams, which flips every listening provider back to data.
+Future<void> refreshServiceCatalog(WidgetRef ref) {
+  return ref.read(serviceCatalogRepositoryProvider).refreshQuietly();
+}

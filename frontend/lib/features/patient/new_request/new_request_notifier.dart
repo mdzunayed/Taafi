@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../core/api/dio_client.dart' show ActiveBookingConflict;
 import '../../../core/api/patient_home_repository.dart';
 import '../../../core/models/service_catalog_item.dart';
 import '../../admin/admin_providers.dart';
@@ -210,10 +211,21 @@ class NewRequestNotifier extends AutoDisposeNotifier<NewRequestState> {
         'patient_name': user?.name,
         'patient_phone': user?.phone,
         'care_type': service.title,
+        // The catalog row behind this booking. `care_type` is free text and
+        // can't be joined back, so without this the backend can't read the
+        // service's `provider_type` and the tracker falls back to inferring
+        // the attending role from the title.
+        'service_id': service.id,
         'preferred_time': state.scheduledAt?.toIso8601String(),
         'condition_note': state.notes.trim(),
-        'location_text':
-            '${state.address.line1}, ${state.address.areaCityZip}',
+        // Join only the parts that exist. The address book now captures one
+        // consolidated line (so `line1` is routinely empty), and a naive
+        // interpolation would ship a leading ", " into the clinician's
+        // dispatch address — and into `areaFromLocation()` on the backend.
+        'location_text': [
+          state.address.line1.trim(),
+          state.address.areaCityZip.trim(),
+        ].where((p) => p.isNotEmpty).join(', '),
         'latitude': state.address.latitude,
         'longitude': state.address.longitude,
         'care_recipient': state.careRecipient?.toPayload(),
@@ -251,6 +263,21 @@ class NewRequestNotifier extends AutoDisposeNotifier<NewRequestState> {
         cachedLocally: false,
       );
       return id;
+    } on ActiveBookingConflict catch (e, st) {
+      // One-active-booking rule fired server-side. The client guard normally
+      // catches this first, so landing here means our cached feed was stale
+      // (or the other booking was created on another device) — refresh it so
+      // the submit bar's banner appears and the button seals itself.
+      // ignore: unused_result
+      await ref.read(patientHomeFeedProvider.notifier).refresh();
+      state = state.copyWith(
+        submission: AsyncError(e, st),
+        validationError: e.message,
+        // Not a transport failure: retrying will keep failing until the
+        // other booking closes, so nothing is "cached for later".
+        cachedLocally: false,
+      );
+      return null;
     } on DioException catch (e, st) {
       // Network failure path. Preserve the form so the patient can retry
       // and surface a localized, friendly snackbar instead of the raw

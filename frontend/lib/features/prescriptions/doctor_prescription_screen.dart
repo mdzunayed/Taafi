@@ -57,12 +57,18 @@ class _DoctorPrescriptionScreenState
   final _weightCtrl = TextEditingController();
   final _heightCtrl = TextEditingController();
   final _adviceCtrl = TextEditingController();
+  // Pre-filled from the booking, but editable: the booked name is often
+  // the account holder rather than the person in front of the doctor
+  // (or is misspelled), and this is what prints on the pad.
+  late final _patientNameCtrl =
+      TextEditingController(text: (widget.patientName ?? '').trim());
   DateTime? _followUpDate;
   late final List<_MedDraft> _items = [_MedDraft()];
   bool _busy = false;
 
   @override
   void dispose() {
+    _patientNameCtrl.dispose();
     _diagnosisCtrl.dispose();
     _weightCtrl.dispose();
     _heightCtrl.dispose();
@@ -127,6 +133,9 @@ class _DoctorPrescriptionScreenState
         items: clean,
         patientAccountId: widget.patientAccountId,
         doctorName: user?.name,
+        patientName: _patientNameCtrl.text.trim(),
+        patientAge: widget.patientAge,
+        patientGender: widget.patientGender,
         diagnosis: _diagnosisCtrl.text,
         weightKg: double.tryParse(_weightCtrl.text.trim()),
         heightCm: double.tryParse(_heightCtrl.text.trim()),
@@ -207,6 +216,15 @@ class _DoctorPrescriptionScreenState
                         patientGender: widget.patientGender,
                       ),
                       const SizedBox(height: 14),
+                      // Printed verbatim on the pad's "Patient:" line.
+                      _SectionLabel(label: 'Patient name (printed on pad)'),
+                      const SizedBox(height: 6),
+                      _PlainField(
+                        controller: _patientNameCtrl,
+                        hint: 'Patient name',
+                        keyboardType: TextInputType.name,
+                      ),
+                      const SizedBox(height: 18),
                       _SectionLabel(label: 'Diagnosis (optional)'),
                       const SizedBox(height: 6),
                       _PlainField(

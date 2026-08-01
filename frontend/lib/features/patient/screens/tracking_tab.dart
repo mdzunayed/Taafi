@@ -10,9 +10,9 @@ import '../../../core/models/patient_request_status.dart';
 import '../../../core/theme/app_colors_ext.dart';
 import '../../../core/theme/mt_colors.dart';
 import '../../../core/theme/mt_text_styles.dart';
+import '../../../core/utils/whatsapp_support.dart';
 import '../../../core/widgets/initials_avatar.dart';
-import '../../auth/auth_provider.dart';
-import '../../shared/presentation/widgets/active_chat_drawer.dart';
+import '../../../core/widgets/whatsapp_support_button.dart';
 import '../navigation/patient_nav_provider.dart';
 import 'view_assigned_doctor_screen.dart';
 import 'widgets/payment_method_choice_card.dart';
@@ -422,10 +422,7 @@ class _BottomSheet extends StatelessWidget {
               // instead of) a doctor. Render the nurse card whenever assigned.
               if (_hasNurse) ...[
                 if (_hasDoctor) const SizedBox(height: 16),
-                _AssignedNursePanel(
-                  nurse: request!.assignedNurse!,
-                  requestId: request!.id,
-                ),
+                _AssignedNursePanel(nurse: request!.assignedNurse!),
               ],
               // Balance-payment pre-commitment: once the visit is priced and
               // a provider is dispatched, let the patient choose Cash on
@@ -433,6 +430,22 @@ class _BottomSheet extends StatelessWidget {
               if (request != null &&
                   PaymentMethodChoiceCard.shouldShow(request!))
                 PaymentMethodChoiceCard(request: request!),
+              // Primary support action for the live visit. Opens WhatsApp with
+              // the booking id + service title pre-filled, so support has the
+              // context immediately — this replaced the in-app chat thread.
+              if (request != null && request!.status.isActive) ...[
+                const SizedBox(height: 14),
+                SizedBox(
+                  width: double.infinity,
+                  child: WhatsAppSupportButton(
+                    label: 'WhatsApp Support',
+                    message: bookingWhatsAppMessage(
+                      bookingId: request!.id,
+                      serviceTitle: request!.serviceTitleEn,
+                    ),
+                  ),
+                ),
+              ],
             ],
           ),
         ),
@@ -596,10 +609,9 @@ class _AssignedDoctorPanel extends StatelessWidget {
 /// often nurse-led (lab collection, dressing, IV), so the patient sees who
 /// is coming — name, qualifications, BNMC registration, and institute — plus
 /// a direct Call CTA.
-class _AssignedNursePanel extends ConsumerWidget {
+class _AssignedNursePanel extends StatelessWidget {
   final AssignedNurse nurse;
-  final String requestId;
-  const _AssignedNursePanel({required this.nurse, required this.requestId});
+  const _AssignedNursePanel({required this.nurse});
 
   Future<void> _call(BuildContext context) async {
     final phone = nurse.phone;
@@ -607,29 +619,8 @@ class _AssignedNursePanel extends ConsumerWidget {
     await launchUrl(Uri(scheme: 'tel', path: phone));
   }
 
-  void _openChat(BuildContext context, WidgetRef ref) {
-    final me = ref.read(currentUserProvider);
-    if (me == null || requestId.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Chat is not available for this visit yet.')),
-      );
-      return;
-    }
-    // Slide-in communication drawer — text/image/location chat plus the
-    // in-header "Call via Secure Line" masked-calling button.
-    openActiveChatDrawer(
-      context,
-      appointmentId: requestId,
-      currentUserId: me.id,
-      otherUserId: nurse.id,
-      otherUserName: nurse.fullName,
-      otherUserAvatarUrl: nurse.profilePicture,
-      otherRoleLabel: 'Assigned Nurse',
-    );
-  }
-
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     final c = context.appColors;
     final quals = nurse.qualifications;
     final institute = nurse.hospitalAffiliation;
@@ -708,42 +699,25 @@ class _AssignedNursePanel extends ConsumerWidget {
           ),
         ),
         const SizedBox(height: 12),
-        Row(
-          children: [
-            Expanded(
-              child: OutlinedButton.icon(
-                onPressed: (nurse.phone?.isNotEmpty ?? false)
-                    ? () => _call(context)
-                    : null,
-                style: OutlinedButton.styleFrom(
-                  foregroundColor: c.info,
-                  side: BorderSide(color: c.info),
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                ),
-                icon: const Icon(Icons.phone_outlined, size: 18),
-                label: const Text('Call Nurse'),
+        // Direct line to the nurse. Anything else (reschedule, complaint,
+        // billing) goes through the sheet's WhatsApp Support button below,
+        // which replaced the old in-app chat drawer.
+        SizedBox(
+          width: double.infinity,
+          child: OutlinedButton.icon(
+            onPressed:
+                (nurse.phone?.isNotEmpty ?? false) ? () => _call(context) : null,
+            style: OutlinedButton.styleFrom(
+              foregroundColor: c.info,
+              side: BorderSide(color: c.info),
+              padding: const EdgeInsets.symmetric(vertical: 12),
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
               ),
             ),
-            const SizedBox(width: 10),
-            Expanded(
-              child: FilledButton.icon(
-                onPressed: () => _openChat(context, ref),
-                style: FilledButton.styleFrom(
-                  backgroundColor: c.info,
-                  foregroundColor: Colors.white,
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                ),
-                icon: const Icon(Icons.forum_outlined, size: 18),
-                label: const Text('Message'),
-              ),
-            ),
-          ],
+            icon: const Icon(Icons.phone_outlined, size: 18),
+            label: const Text('Call Nurse'),
+          ),
         ),
       ],
     );

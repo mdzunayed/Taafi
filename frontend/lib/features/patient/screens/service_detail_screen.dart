@@ -6,8 +6,10 @@ import 'package:intl/intl.dart';
 import '../../../core/models/service_catalog_item.dart';
 import '../../../core/theme/mt_colors.dart';
 import '../../../core/theme/mt_text_styles.dart';
+import '../../../core/api/patient_home_repository.dart';
 import '../../../core/widgets/mt_button.dart';
 import '../new_request/new_request_notifier.dart';
+import 'widgets/active_booking_banner.dart';
 
 final _moneyFmt = NumberFormat('#,###', 'en_US');
 String _money(num n) => '৳${_moneyFmt.format(n.round())}';
@@ -26,6 +28,10 @@ class ServiceDetailScreen extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // One booking at a time: while a non-terminal request is open the
+    // backend rejects a new one with 409, so the Book affordance is disabled
+    // here and the banner explains why (and routes to the open booking).
+    final hasActiveBooking = ref.watch(patientActiveRequestProvider) != null;
     return Scaffold(
       backgroundColor: MtColors.bg,
       body: SafeArea(
@@ -85,6 +91,7 @@ class ServiceDetailScreen extends ConsumerWidget {
             ),
             _ActionBar(
               price: item.price,
+              blocked: hasActiveBooking,
               onBook: () => _book(context, ref),
             ),
           ],
@@ -186,9 +193,17 @@ class _Chip extends StatelessWidget {
 
 class _ActionBar extends StatelessWidget {
   final double price;
+
+  /// The patient already has a booking in flight — Book is inert and the
+  /// banner above takes over as the actionable element.
+  final bool blocked;
   final VoidCallback onBook;
 
-  const _ActionBar({required this.price, required this.onBook});
+  const _ActionBar({
+    required this.price,
+    required this.blocked,
+    required this.onBook,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -198,23 +213,38 @@ class _ActionBar extends StatelessWidget {
         border: Border(top: BorderSide(color: MtColors.line)),
       ),
       padding: const EdgeInsets.fromLTRB(16, 12, 16, 16),
-      child: Row(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
         children: [
-          Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('From', style: MtTextStyles.bodySm.copyWith(color: MtColors.ink3)),
-              Text(_money(price),
-                  style: MtTextStyles.h3.copyWith(color: MtColors.brand)),
-            ],
-          ),
-          const SizedBox(width: 16),
-          Expanded(
-            child: MtButton(
-              label: 'Book',
-              leadingIcon: Icons.event_available,
-              onPressed: onBook,
+          if (blocked) ...[
+            // Popping first puts the shell (and its Activities tab) back on
+            // screen before the tab switch lands.
+            ActiveBookingBanner(
+              onBeforeNavigate: () => Navigator.of(context).pop(),
             ),
+            const SizedBox(height: 12),
+          ],
+          Row(
+            children: [
+              Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text('From',
+                      style:
+                          MtTextStyles.bodySm.copyWith(color: MtColors.ink3)),
+                  Text(_money(price),
+                      style: MtTextStyles.h3.copyWith(color: MtColors.brand)),
+                ],
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: MtButton(
+                  label: 'Book',
+                  leadingIcon: Icons.event_available,
+                  onPressed: blocked ? null : onBook,
+                ),
+              ),
+            ],
           ),
         ],
       ),

@@ -19,11 +19,14 @@
 import 'admin_models.dart';
 import 'assigned_doctor.dart';
 import 'assigned_nurse.dart';
+import 'assigned_provider.dart';
+import 'booking_milestone.dart';
 import 'doctor_dashboard.dart';
 import 'doctor_review.dart';
 import 'patient_active_request.dart';
 import 'patient_home_feed.dart';
 import 'patient_request_status.dart';
+import 'provider_type.dart';
 import 'recent_provider.dart';
 import 'service.dart';
 import 'user.dart';
@@ -215,6 +218,49 @@ AdminCareRequest adminCareRequestFromMongo(Map<String, dynamic> j) {
   );
 }
 
+/// Canonical `care_requests.status` → patient-facing [BookingMilestone].
+///
+/// Mirrors `MILESTONE_BY_STATUS` in backend/src/utils/bookingMilestones.js.
+/// Only used as a fallback: when the server ships an explicit `milestone` we
+/// take it verbatim. Keeping the map here means a client talking to an older
+/// backend still renders a correct step instead of pinning to step 1.
+BookingMilestone _milestoneFromStatus(String? wire) {
+  switch (wire?.toLowerCase()) {
+    case 'awaiting_deposit':
+    case 'submitted':
+    case 'pending':
+    case 'pending_review':
+    case 'deposit_paid_admin_reviewing':
+      return BookingMilestone.requested;
+    case 'approved':
+    case 'amount_assigned_awaiting_final_payment':
+      return BookingMilestone.confirmed;
+    case 'assigned':
+    case 'matched':
+    case 'accepted':
+      return BookingMilestone.scheduled;
+    case 'enroute':
+    case 'en_route':
+    case 'on_the_way':
+    case 'arrived':
+      return BookingMilestone.enRoute;
+    case 'in_service':
+    case 'inservice':
+    case 'in_progress':
+    case 'nurse_completed':
+      return BookingMilestone.inService;
+    case 'service_completed_awaiting_final_payment':
+    case 'completed':
+      return BookingMilestone.completed;
+    case 'cancelled':
+    case 'canceled':
+    case 'rejected':
+      return BookingMilestone.cancelled;
+    default:
+      return BookingMilestone.requested;
+  }
+}
+
 /// Single `care_requests` document → [PatientActiveRequest] (patient's
 /// own active card view).
 ///
@@ -250,6 +296,27 @@ PatientActiveRequest patientActiveFromMongo(Map<String, dynamic> j) {
     }
   }
 
+  // Prefer the server's milestone; fall back to deriving one from the
+  // canonical status so a backend that predates the tracker still yields a
+  // correct step (rather than defaulting everything to step 1).
+  final rawMilestone = _str(j['milestone']);
+  final milestone = rawMilestone != null
+      ? BookingMilestoneX.fromWire(rawMilestone)
+      : _milestoneFromStatus(_str(j['status']));
+
+  // Who is attending, as resolved by the server (`resolved_provider_type`
+  // accounts for a booking whose dispatched provider outranks the booked
+  // service's role). `provider_type` is the raw stored column, read as the
+  // fallback for an API that predates the resolver; the doctor/nurse populate
+  // blocks settle it for a legacy payload that carries neither.
+  final providerType = ProviderTypeX.tryFromWire(_str(j['resolved_provider_type'])) ??
+      ProviderTypeX.tryFromWire(_str(j['provider_type'])) ??
+      (doctor != null
+          ? ProviderType.doctor
+          : nurse != null
+              ? ProviderType.nurse
+              : ProviderTypeX.fallback);
+
   return PatientActiveRequest(
     id: _idOf(j),
     serviceTitleEn: _str(j['care_type']) ?? '',
@@ -277,6 +344,28 @@ PatientActiveRequest patientActiveFromMongo(Map<String, dynamic> j) {
     adjustedDiscount: _money(j['adjusted_discount']),
     paymentPreference: _str(j['payment_preference']),
     patientPhone: _str(j['patient_phone']),
+    // Milestone tracker block, derived server-side from `status` (see
+    // backend/src/utils/bookingMilestones.js). Older backends omit these —
+    // `fromWire` and `listFrom` both degrade to a locally-derived lifecycle
+    // so the tracker still renders.
+    milestone: milestone,
+    milestoneLabel: _str(j['milestone_label']) ?? '',
+    scheduledTime: _date(j['scheduled_time']) ?? _date(j['preferred_time']),
+    scheduledTimeLabel: _str(j['scheduled_time_label']),
+    assignedProviderName: _str(j['assigned_provider_name']),
+    providerType: providerType,
+    // The dispatch-time contact card. Null until an admin assigns someone —
+    // and null for a booking whose provider record carries no name at all,
+    // which the tracking screen reads as "nobody to show yet".
+    assignedProvider: AssignedProvider.fromJson(
+      j['assigned_provider'],
+      fallbackType: providerType,
+    ),
+    timeline: MilestoneTimelineEntry.listFrom(
+      j['milestone_timeline'],
+      current: milestone,
+      providerType: providerType,
+    ),
     updatedAt: _date(j['updated_at']) ?? DateTime.now(),
   );
 }

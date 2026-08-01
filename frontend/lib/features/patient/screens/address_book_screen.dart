@@ -270,28 +270,68 @@ class _AddressEditorSheet extends ConsumerStatefulWidget {
       _AddressEditorSheetState();
 }
 
+/// The residential tags offered as one-tap chips, replacing the free-text
+/// label field. `null` is the "Other" escape hatch, which reveals a small
+/// custom-name input for anything outside these four.
+const _kResidentialTags = <String>['Home', 'Office', 'Parents', 'Hospital'];
+
 class _AddressEditorSheetState extends ConsumerState<_AddressEditorSheet> {
   final _formKey = GlobalKey<FormState>();
-  late final TextEditingController _label =
-      TextEditingController(text: widget.existing?.label ?? 'Home');
-  late final TextEditingController _area =
-      TextEditingController(text: widget.existing?.fullAddressText ?? '');
-  late final TextEditingController _house =
-      TextEditingController(text: widget.existing?.flatFloorHolding ?? '');
-  late final TextEditingController _landmark =
-      TextEditingController(text: widget.existing?.landmarkInstructions ?? '');
+
+  /// The chosen residential tag, or `null` while "Other" is selected (the
+  /// name then comes from [_customLabel]).
+  late String? _tag = _initialTag();
+
+  /// Only used under the "Other" chip.
+  late final TextEditingController _customLabel =
+      TextEditingController(text: _initialTag() == null ? _existingLabel : '');
+
+  /// The single consolidated address line. Seeded from the two legacy
+  /// columns joined together so editing an address saved under the old
+  /// split-field form shows everything the patient originally typed.
+  late final TextEditingController _address =
+      TextEditingController(text: _initialAddressText());
+
   late double? _lat = widget.existing?.latitude;
   late double? _lng = widget.existing?.longitude;
   late bool _isDefault = widget.existing?.isDefault ?? false;
   bool _locating = false;
   bool _saving = false;
 
+  String get _existingLabel => widget.existing?.label.trim() ?? 'Home';
+
+  /// Match the saved label onto a chip, case-insensitively. An unrecognised
+  /// label (e.g. "Nani's flat") falls through to "Other" with the original
+  /// text preserved in the custom field.
+  String? _initialTag() {
+    if (widget.existing == null) return _kResidentialTags.first;
+    final saved = _existingLabel.toLowerCase();
+    for (final tag in _kResidentialTags) {
+      if (tag.toLowerCase() == saved) return tag;
+    }
+    return null;
+  }
+
+  String _initialAddressText() {
+    final e = widget.existing;
+    if (e == null) return '';
+    return [e.flatFloorHolding.trim(), e.fullAddressText.trim()]
+        .where((p) => p.isNotEmpty)
+        .join(', ');
+  }
+
+  /// The label actually persisted: the chip, or the custom text under
+  /// "Other" (falling back to "Home" if that was left blank).
+  String get _effectiveLabel {
+    if (_tag != null) return _tag!;
+    final custom = _customLabel.text.trim();
+    return custom.isEmpty ? 'Home' : custom;
+  }
+
   @override
   void dispose() {
-    _label.dispose();
-    _area.dispose();
-    _house.dispose();
-    _landmark.dispose();
+    _customLabel.dispose();
+    _address.dispose();
     super.dispose();
   }
 
@@ -346,10 +386,19 @@ class _AddressEditorSheetState extends ConsumerState<_AddressEditorSheet> {
     try {
       await ref.read(dioClientProvider).saveAddress(
             id: widget.existing?.id,
-            label: _label.text.trim(),
-            fullAddressText: _area.text.trim(),
-            flatFloorHolding: _house.text.trim(),
-            landmarkInstructions: _landmark.text.trim(),
+            label: _effectiveLabel,
+            // The consolidated line lands wholesale in `full_address_text` —
+            // the column every consumer already reads (list summaries, the
+            // booking form's `areaCityZip`). `flat_floor_holding` is left
+            // blank rather than guessed at by parsing free text; it stays in
+            // the schema for rows written by the old split-field editor.
+            fullAddressText: _address.text.trim(),
+            flatFloorHolding: '',
+            // No longer collected here — the booking form has its own
+            // per-visit landmark field. Existing text is passed through
+            // untouched so editing an address doesn't silently erase it.
+            landmarkInstructions:
+                widget.existing?.landmarkInstructions.trim() ?? '',
             latitude: _lat,
             longitude: _lng,
             isDefault: _isDefault,
@@ -391,39 +440,77 @@ class _AddressEditorSheetState extends ConsumerState<_AddressEditorSheet> {
               Text(widget.existing == null ? 'Add address' : 'Edit address',
                   style: MtTextStyles.h3.copyWith(color: MtColors.ink)),
               const SizedBox(height: 16),
-              _field(_label, 'Label (Home, Office, Parents House…)',
-                  validator: true),
-              const SizedBox(height: 12),
-              _field(_house, 'Flat / House / Holding No.'),
-              const SizedBox(height: 12),
-              _field(_area, 'Area / Neighborhood, City', validator: true),
-              const SizedBox(height: 12),
-              _field(_landmark, 'Landmark instructions for the clinician',
-                  maxLines: 2),
-              const SizedBox(height: 14),
-              Row(
+
+              // 1 — Auto-fill first. Pinning GPS is the lowest-effort way to
+              // start, so it sits above the field it fills rather than
+              // below the form where it used to be missed.
+              _LocationChip(
+                pinned: _lat != null && _lng != null,
+                loading: _locating,
+                onTap: _useCurrentLocation,
+              ),
+              const SizedBox(height: 18),
+
+              // 2 — Residential tag. Four one-tap chips instead of a text
+              // field; "Other" reveals a name box for the long tail.
+              Text('Save as',
+                  style: MtTextStyles.labelMd.copyWith(color: MtColors.ink2)),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
                 children: [
-                  Expanded(
-                    child: MtButton(
-                      label: (_lat != null && _lng != null)
-                          ? 'Location pinned ✓'
-                          : 'Use my current location',
-                      isOutlined: true,
-                      leadingIcon: Icons.my_location,
-                      isLoading: _locating,
-                      onPressed: _useCurrentLocation,
+                  for (final tag in _kResidentialTags)
+                    _TagChip(
+                      label: tag,
+                      icon: _iconForLabel(tag),
+                      selected: _tag == tag,
+                      onTap: () => setState(() => _tag = tag),
                     ),
+                  _TagChip(
+                    label: 'Other',
+                    icon: Icons.bookmark_border,
+                    selected: _tag == null,
+                    onTap: () => setState(() => _tag = null),
                   ),
                 ],
               ),
+              if (_tag == null) ...[
+                const SizedBox(height: 10),
+                _field(_customLabel, 'Name this address'),
+              ],
+              const SizedBox(height: 18),
+
+              // 3 — One field for the whole address. Everything the rider
+              // needs on a single line; no flat/road/area/city hopping.
+              Text('Flat / House / Road / Block, area',
+                  style: MtTextStyles.labelMd.copyWith(color: MtColors.ink2)),
               const SizedBox(height: 8),
-              SwitchListTile.adaptive(
-                contentPadding: EdgeInsets.zero,
-                activeThumbColor: MtColors.brand,
-                value: _isDefault,
-                onChanged: (v) => setState(() => _isDefault = v),
-                title: Text('Set as default address',
-                    style: MtTextStyles.labelMd.copyWith(color: MtColors.ink)),
+              _field(
+                _address,
+                'e.g. Flat A-3, House 12, Road 4, Block C, '
+                'banasree, rampura, dhaka',
+                validator: true,
+                maxLines: 3,
+                minLines: 2,
+              ),
+              const SizedBox(height: 18),
+
+              // 4 — Footer: default toggle inline on the right, then the
+              // full-width primary action.
+              Row(
+                children: [
+                  Expanded(
+                    child: Text('Set as default address',
+                        style: MtTextStyles.labelMd
+                            .copyWith(color: MtColors.ink)),
+                  ),
+                  Switch.adaptive(
+                    value: _isDefault,
+                    activeThumbColor: MtColors.brand,
+                    onChanged: (v) => setState(() => _isDefault = v),
+                  ),
+                ],
               ),
               const SizedBox(height: 8),
               MtButton(
@@ -440,10 +527,17 @@ class _AddressEditorSheetState extends ConsumerState<_AddressEditorSheet> {
   }
 
   Widget _field(TextEditingController c, String hint,
-      {bool validator = false, int maxLines = 1}) {
+      {bool validator = false, int maxLines = 1, int? minLines}) {
     return TextFormField(
       controller: c,
       maxLines: maxLines,
+      minLines: minLines,
+      // Multi-line address entry: newline should break the line, not submit.
+      textInputAction:
+          maxLines > 1 ? TextInputAction.newline : TextInputAction.done,
+      keyboardType:
+          maxLines > 1 ? TextInputType.multiline : TextInputType.text,
+      textCapitalization: TextCapitalization.words,
       decoration: InputDecoration(
         hintText: hint,
         filled: true,
@@ -462,6 +556,120 @@ class _AddressEditorSheetState extends ConsumerState<_AddressEditorSheet> {
       validator: validator
           ? (v) => (v ?? '').trim().isEmpty ? 'Required' : null
           : null,
+    );
+  }
+}
+
+/// Elevated auto-fill action at the top of the editor. Flips to a settled
+/// "pinned" state once coordinates are captured, so the patient can see the
+/// GPS fix took without hunting for a separate confirmation.
+class _LocationChip extends StatelessWidget {
+  final bool pinned;
+  final bool loading;
+  final VoidCallback onTap;
+
+  const _LocationChip({
+    required this.pinned,
+    required this.loading,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final fg = pinned ? MtColors.completed : MtColors.brand;
+    return Material(
+      color: pinned ? MtColors.surface : MtColors.brandSofter,
+      borderRadius: BorderRadius.circular(14),
+      elevation: pinned ? 0 : 2,
+      shadowColor: MtColors.brand.withValues(alpha: 0.25),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(14),
+        onTap: loading ? null : onTap,
+        child: Container(
+          width: double.infinity,
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 13),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(14),
+            border: Border.all(color: fg.withValues(alpha: 0.4)),
+          ),
+          child: Row(
+            children: [
+              if (loading)
+                SizedBox(
+                  width: 18,
+                  height: 18,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 2,
+                    valueColor: AlwaysStoppedAnimation(fg),
+                  ),
+                )
+              else
+                Icon(pinned ? Icons.check_circle : Icons.my_location,
+                    size: 18, color: fg),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Text(
+                  loading
+                      ? 'Finding you…'
+                      : pinned
+                          ? 'Current location pinned — tap to update'
+                          : '📍 Use my current location',
+                  style: MtTextStyles.labelMd.copyWith(color: fg),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// One residential tag. Selection is the only state that matters, so it's a
+/// plain filled/outlined pill rather than a Material `ChoiceChip` (which
+/// carries theming this sheet doesn't otherwise use).
+class _TagChip extends StatelessWidget {
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final VoidCallback onTap;
+
+  const _TagChip({
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final fg = selected ? Colors.white : MtColors.ink2;
+    return Material(
+      color: selected ? MtColors.brand : MtColors.bg,
+      borderRadius: BorderRadius.circular(20),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(20),
+        onTap: () {
+          HapticFeedback.selectionClick();
+          onTap();
+        },
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(
+                color: selected ? MtColors.brand : MtColors.line),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(icon, size: 16, color: fg),
+              const SizedBox(width: 6),
+              Text(label, style: MtTextStyles.labelMd.copyWith(color: fg)),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

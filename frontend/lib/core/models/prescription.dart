@@ -665,6 +665,15 @@ class Prescription extends Equatable {
     return doctor?.email ?? '';
   }
 
+  /// Name printed on the pad's "Patient:" line. The issue-time snapshot
+  /// wins — that's the name the doctor confirmed (or corrected) on the
+  /// prescribing form — then the admin-row patient block.
+  String get padPatientName {
+    final s = patientSnapshot?.name ?? '';
+    if (s.isNotEmpty) return s;
+    return patientName;
+  }
+
   /// Is the given (item, slot, day) already logged as taken?
   bool isDoseTaken({
     required String itemId,

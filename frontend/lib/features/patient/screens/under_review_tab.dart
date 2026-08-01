@@ -3,7 +3,6 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/api/patient_home_repository.dart';
 import '../../../core/config/support_config.dart';
@@ -14,6 +13,7 @@ import '../../prescriptions/prescriptions_provider.dart';
 import '../../../core/models/patient_active_request.dart';
 import '../../../core/models/patient_request_status.dart';
 import '../../../core/theme/mt_text_styles.dart';
+import '../../../core/utils/whatsapp_support.dart';
 import '../../../core/widgets/mt_empty_state.dart';
 import '../../../core/widgets/mt_skeleton.dart';
 import '../../../core/widgets/status_badge.dart';
@@ -182,6 +182,41 @@ bool _isBookingPhase(BookingStatus s) {
 /// Full-bleed midnight surface that renders the current booking phase: the
 /// ৳100 deposit prompt, the "under review" invoice placeholder, or the live
 /// dynamic invoice with the outstanding balance + Pay CTA.
+/// Patient self-cancel, shared by the review timeline and the awaiting-deposit
+/// surface (both states the backend's `PATIENT_CANCELLABLE` guard accepts).
+Future<void> _confirmCancel(
+  BuildContext context,
+  WidgetRef ref,
+  String requestId,
+) async {
+  final hd = HomeDark.of(context);
+  final messenger = ScaffoldMessenger.of(context);
+  final reason = await showDialog<_CancelDialogResult>(
+    context: context,
+    builder: (dialogContext) => const _CancelConfirmDialog(),
+  );
+  if (reason == null || !reason.confirmed) return;
+
+  try {
+    await ref
+        .read(patientHomeFeedProvider.notifier)
+        .cancelActiveRequest(reason: reason.reason);
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text('Request $requestId cancelled'),
+        backgroundColor: hd.positive,
+      ),
+    );
+  } catch (e) {
+    messenger.showSnackBar(
+      SnackBar(
+        content: Text('Could not cancel request: $e'),
+        backgroundColor: hd.danger,
+      ),
+    );
+  }
+}
+
 class _BookingPhaseView extends ConsumerWidget {
   final PatientActiveRequest request;
 
@@ -207,7 +242,7 @@ class _BookingPhaseView extends ConsumerWidget {
             ),
           ),
           const SizedBox(height: 16),
-          if (booking.status == BookingStatus.awaitingDeposit)
+          if (booking.status == BookingStatus.awaitingDeposit) ...[
             _DepositPrompt(
               booking: booking,
               onPay: () => showConfirmAppointmentRequestSheet(
@@ -215,8 +250,19 @@ class _BookingPhaseView extends ConsumerWidget {
                 bookingId: booking.bookingId,
                 serviceName: booking.serviceName,
               ),
-            )
-          else
+            ),
+            const SizedBox(height: 12),
+            // A patient who decides not to pay the deposit needs a way out:
+            // this booking counts as "active", so until it's cancelled the
+            // one-active-booking rule blocks every new request. Nothing has
+            // been paid in this state, so cancelling costs nothing.
+            _OutlinedAction(
+              icon: Icons.close,
+              label: "Cancel — I don't want to book",
+              destructive: true,
+              onTap: () => _confirmCancel(context, ref, request.id),
+            ),
+          ] else
             DynamicInvoiceCard(booking: booking),
           const SizedBox(height: 18),
           _MidnightAdminLink(requestId: request.id),
@@ -314,32 +360,12 @@ class _MidnightAdminLink extends StatelessWidget {
   const _MidnightAdminLink({required this.requestId});
 
   Future<void> _chatAdmin(BuildContext context) async {
-    final messenger = ScaffoldMessenger.of(context);
-    final digits =
-        SupportConfig.supportPhone.replaceAll(RegExp(r'[^0-9]'), '');
-    final body = Uri.encodeComponent(
-      'Hi Taafi admin, I have a question about booking $requestId.',
+    await launchWhatsAppSupport(
+      context,
+      message: 'Hi Taafi admin, I have a question about booking $requestId.',
+      fallbackMessage:
+          'Reach admin at ${SupportConfig.whatsappNumberDisplay}',
     );
-    final uri = Uri.parse('https://wa.me/$digits?text=$body');
-    try {
-      final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
-      if (!ok) {
-        messenger.showSnackBar(
-          SnackBar(
-            content: Text(
-              'Reach admin at ${SupportConfig.supportPhoneDisplay}',
-            ),
-          ),
-        );
-      }
-    } catch (_) {
-      messenger.showSnackBar(
-        SnackBar(
-          content:
-              Text('Reach admin at ${SupportConfig.supportPhoneDisplay}'),
-        ),
-      );
-    }
   }
 
   @override
@@ -535,62 +561,12 @@ class _ReviewView extends ConsumerWidget {
   const _ReviewView({required this.request});
 
   Future<void> _chatAdmin(BuildContext context) async {
-    final messenger = ScaffoldMessenger.of(context);
-    final digits =
-        SupportConfig.supportPhone.replaceAll(RegExp(r'[^0-9]'), '');
-    final body = Uri.encodeComponent(
-      'Hi Taafi admin, I have a question about request ${request.id}.',
+    await launchWhatsAppSupport(
+      context,
+      message: 'Hi Taafi admin, I have a question about request ${request.id}.',
+      fallbackMessage: 'Could not open WhatsApp. Reach admin at '
+          '${SupportConfig.whatsappNumberDisplay}',
     );
-    final uri = Uri.parse('https://wa.me/$digits?text=$body');
-    try {
-      final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
-      if (!ok) {
-        messenger.showSnackBar(
-          SnackBar(
-            content: Text(
-              'Could not open WhatsApp. Reach admin at ${SupportConfig.supportPhoneDisplay}',
-            ),
-          ),
-        );
-      }
-    } catch (_) {
-      messenger.showSnackBar(
-        SnackBar(
-          content: Text(
-            'Could not open WhatsApp. Reach admin at ${SupportConfig.supportPhoneDisplay}',
-          ),
-        ),
-      );
-    }
-  }
-
-  Future<void> _confirmCancel(BuildContext context, WidgetRef ref) async {
-    final hd = HomeDark.of(context);
-    final messenger = ScaffoldMessenger.of(context);
-    final reason = await showDialog<_CancelDialogResult>(
-      context: context,
-      builder: (dialogContext) => const _CancelConfirmDialog(),
-    );
-    if (reason == null || !reason.confirmed) return;
-
-    try {
-      await ref
-          .read(patientHomeFeedProvider.notifier)
-          .cancelActiveRequest(reason: reason.reason);
-      messenger.showSnackBar(
-        SnackBar(
-          content: Text('Request ${request.id} cancelled'),
-          backgroundColor: hd.positive,
-        ),
-      );
-    } catch (e) {
-      messenger.showSnackBar(
-        SnackBar(
-          content: Text('Could not cancel request: $e'),
-          backgroundColor: hd.danger,
-        ),
-      );
-    }
   }
 
   @override
@@ -625,7 +601,7 @@ class _ReviewView extends ConsumerWidget {
                 child: _OutlinedAction(
                   icon: Icons.close,
                   label: 'Cancel request',
-                  onTap: () => _confirmCancel(context, ref),
+                  onTap: () => _confirmCancel(context, ref, request.id),
                   destructive: true,
                 ),
               ),
@@ -638,7 +614,9 @@ class _ReviewView extends ConsumerWidget {
 
   /// True only for the pre-assignment states the patient may still cancel.
   /// Uses the exact backend wire status ([PatientActiveRequest.rawStatus]) so
-  /// the UI matches the server-side guard precisely.
+  /// the UI matches the server-side guard precisely. (`awaiting_deposit` is
+  /// also cancellable, but it never renders here — it gets the dedicated
+  /// deposit surface in [_BookingPhaseView], which carries its own button.)
   bool get _patientCancellable =>
       const {'submitted', 'approved'}.contains(request.rawStatus);
 }

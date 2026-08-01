@@ -5,6 +5,7 @@ import 'package:intl/intl.dart';
 
 import '../../../core/api/service_catalog_providers.dart';
 import '../../../core/models/service_catalog_item.dart';
+import '../../../core/models/service_category.dart';
 import '../../../core/theme/mt_colors.dart';
 import '../../../core/theme/mt_text_styles.dart';
 import '../../../core/widgets/mt_error_state.dart';
@@ -68,7 +69,7 @@ class _ServiceCatalogScreenState extends ConsumerState<ServiceCatalogScreen> {
           child: MtErrorState(
             title: "Couldn't load services",
             message: e.toString(),
-            onRetry: () => ref.read(serviceCatalogRepositoryProvider).refresh(),
+            onRetry: () => refreshServiceCatalog(ref),
           ),
         ),
         data: (services) {
@@ -82,9 +83,20 @@ class _ServiceCatalogScreenState extends ConsumerState<ServiceCatalogScreen> {
           }.toList()
             ..sort();
 
+          // A promo banner's stored `targetCategoryId` may still hold a legacy
+          // string ('Consultation'), so when the wanted value resolves to a
+          // canonical category we compare normalized on both sides. Anything
+          // else — an admin-typed value with no canonical home — keeps the
+          // plain raw match it has always had.
+          final want = normalizeServiceCategory(_category);
           final filtered = _category == null
               ? services
-              : services.where((s) => s.category.trim() == _category).toList();
+              : services.where((s) {
+                  if (want.isNotEmpty) {
+                    return normalizeServiceCategory(s.category) == want;
+                  }
+                  return s.category.trim() == _category!.trim();
+                }).toList();
 
           return Column(
             children: [

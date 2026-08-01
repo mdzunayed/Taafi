@@ -1,21 +1,20 @@
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 import '../../../core/models/assigned_doctor.dart';
 import '../../../core/theme/mt_colors.dart';
 import '../../../core/theme/mt_text_styles.dart';
+import '../../../core/utils/whatsapp_support.dart';
 import '../../../core/widgets/initials_avatar.dart';
-import '../../auth/auth_provider.dart';
-import '../../shared/presentation/widgets/active_chat_drawer.dart';
+import '../../../core/widgets/whatsapp_support_button.dart';
 
 /// Read-only "Your Assigned Doctor" screen the patient reaches from the
 /// Tracking tab once the admin has matched a doctor. Renders the full
 /// professional profile: photo, verified badge, BMDC license, experience,
 /// rating, and a single big Call Doctor CTA that triggers a `tel:` deep
-/// link. A secondary "Message" button opens the real-time chat surface
-/// scoped to the current appointment.
-class ViewAssignedDoctorScreen extends ConsumerWidget {
+/// link. A secondary WhatsApp button opens the support thread with the
+/// booking already named — it replaced the in-app chat surface.
+class ViewAssignedDoctorScreen extends StatelessWidget {
   final AssignedDoctor doctor;
   final String? appointmentId;
   const ViewAssignedDoctorScreen({
@@ -23,27 +22,6 @@ class ViewAssignedDoctorScreen extends ConsumerWidget {
     required this.doctor,
     this.appointmentId,
   });
-
-  void _openChat(BuildContext context, String currentUserId) {
-    final apptId = appointmentId;
-    if (apptId == null || apptId.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Chat is only available for active appointments.')),
-      );
-      return;
-    }
-    // Slide-in communication drawer — text/image/location chat plus the
-    // in-header "Call via Secure Line" masked-calling button.
-    openActiveChatDrawer(
-      context,
-      appointmentId: apptId,
-      currentUserId: currentUserId,
-      otherUserId: doctor.id,
-      otherUserName: doctor.fullName,
-      otherUserAvatarUrl: doctor.profilePicture,
-      otherRoleLabel: 'Assigned Doctor',
-    );
-  }
 
   Future<void> _callDoctor(BuildContext context) async {
     final messenger = ScaffoldMessenger.of(context);
@@ -70,8 +48,7 @@ class ViewAssignedDoctorScreen extends ConsumerWidget {
   }
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final currentUser = ref.watch(currentUserProvider);
+  Widget build(BuildContext context) {
     return Scaffold(
       backgroundColor: MtColors.bg,
       appBar: AppBar(
@@ -153,45 +130,17 @@ class ViewAssignedDoctorScreen extends ConsumerWidget {
               onPressed: () => _callDoctor(context),
             ),
             const SizedBox(height: 10),
-            _MessageButton(
-              enabled: currentUser != null &&
-                  appointmentId != null &&
-                  appointmentId!.isNotEmpty,
-              onPressed: () {
-                if (currentUser == null) return;
-                _openChat(context, currentUser.id);
-              },
+            // Support thread instead of the retired in-app chat. Falls back to
+            // a generic opener when this screen was pushed without a booking.
+            WhatsAppSupportButton(
+              label: 'WhatsApp Support',
+              outlined: true,
+              message: (appointmentId?.isNotEmpty ?? false)
+                  ? bookingWhatsAppMessage(bookingId: appointmentId!)
+                  : 'Hi Taafi, I have a question about '
+                      '${doctor.fullName}.',
             ),
           ],
-        ),
-      ),
-    );
-  }
-}
-
-class _MessageButton extends StatelessWidget {
-  final bool enabled;
-  final VoidCallback onPressed;
-  const _MessageButton({required this.enabled, required this.onPressed});
-
-  @override
-  Widget build(BuildContext context) {
-    return SizedBox(
-      width: double.infinity,
-      child: OutlinedButton.icon(
-        onPressed: enabled ? onPressed : null,
-        style: OutlinedButton.styleFrom(
-          foregroundColor: MtColors.brand,
-          side: const BorderSide(color: MtColors.brand),
-          padding: const EdgeInsets.symmetric(vertical: 16),
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(14),
-          ),
-        ),
-        icon: const Icon(Icons.chat_bubble_outline, size: 20),
-        label: Text(
-          enabled ? 'Message Doctor' : 'Chat unavailable',
-          style: MtTextStyles.labelLg.copyWith(color: MtColors.brand),
         ),
       ),
     );
