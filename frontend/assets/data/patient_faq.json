@@ -1,0 +1,74 @@
+[
+  {
+    "categoryEn": "Booking & requests",
+    "categoryBn": "বুকিং ও আবেদন",
+    "items": [
+      {
+        "qEn": "How do I book a doctor at home?",
+        "qBn": "কীভাবে বাসায় ডাক্তার বুক করব?",
+        "aEn": "Open the Home tab, tap 'Start new request', pick a care service, set your address and preferred time, then submit. Our medical admin reviews every request and assigns a verified doctor within a few minutes.",
+        "aBn": "Home ট্যাব থেকে 'Start new request' চাপুন, সেবা নির্বাচন করুন, ঠিকানা ও সময় দিন এবং জমা দিন। প্রতিটি আবেদন আমাদের মেডিকেল অ্যাডমিন যাচাই করে কয়েক মিনিটের মধ্যে একজন ভেরিফাইড ডাক্তার নির্ধারণ করেন।"
+      },
+      {
+        "qEn": "Can I schedule a visit for later?",
+        "qBn": "পরবর্তী সময়ের জন্য কি অ্যাপয়েন্টমেন্ট নেয়া যায়?",
+        "aEn": "Yes. While creating a new request, toggle off 'ASAP' and pick a future date and time. The doctor will confirm availability before assignment.",
+        "aBn": "হ্যাঁ। নতুন আবেদন তৈরির সময় 'ASAP' বন্ধ করে ভবিষ্যৎ তারিখ ও সময় নির্বাচন করুন। ডাক্তার নিশ্চিত করার পর অ্যাসাইনমেন্ট চূড়ান্ত হবে।"
+      },
+      {
+        "qEn": "How do I cancel a request?",
+        "qBn": "আবেদন কীভাবে বাতিল করব?",
+        "aEn": "Go to the Under Review tab, open the request and tap 'Cancel request'. Cancellations made within 5 minutes of submission are always free.",
+        "aBn": "Under Review ট্যাবে গিয়ে আবেদন খুলে 'Cancel request' চাপুন। সাবমিট করার ৫ মিনিটের মধ্যে বাতিল করলে কোন চার্জ নেই।"
+      }
+    ]
+  },
+  {
+    "categoryEn": "Payment & pricing",
+    "categoryBn": "পেমেন্ট ও মূল্য",
+    "items": [
+      {
+        "qEn": "How do I pay?",
+        "qBn": "পেমেন্ট কীভাবে করব?",
+        "aEn": "Payment is collected after the visit. You can pay in cash to the doctor, or via bKash / Nagad / card using the in-app receipt link sent to your phone.",
+        "aBn": "ভিজিট শেষ হওয়ার পর পেমেন্ট সংগ্রহ করা হয়। আপনি নগদ, bKash, Nagad, অথবা কার্ডে — অ্যাপ-জেনারেটেড রসিদ লিঙ্কের মাধ্যমে পরিশোধ করতে পারবেন।"
+      },
+      {
+        "qEn": "Are there extra charges for late-night visits?",
+        "qBn": "রাত্রিকালীন ভিজিটে কি অতিরিক্ত চার্জ আছে?",
+        "aEn": "Visits between 10 PM and 6 AM include a small after-hours fee shown clearly during booking. No hidden charges are ever added later.",
+        "aBn": "রাত ১০টা থেকে ভোর ৬টার মধ্যে ভিজিটে সামান্য আফটার-আওয়ার ফি প্রযোজ্য, যা বুকিংয়ের সময়েই দেখানো হয়। পরে কোন গোপন চার্জ যোগ হয় না।"
+      }
+    ]
+  },
+  {
+    "categoryEn": "Doctors & verification",
+    "categoryBn": "ডাক্তার ও যাচাই",
+    "items": [
+      {
+        "qEn": "Are the doctors verified?",
+        "qBn": "ডাক্তাররা কি যাচাইকৃত?",
+        "aEn": "Every Medi-Treat doctor is verified via BMDC registration, hospital affiliation, and an in-person interview before being onboarded.",
+        "aBn": "প্রতিটি Medi-Treat ডাক্তার BMDC রেজিস্ট্রেশন, হাসপাতাল-সংযুক্তি এবং সরাসরি ইন্টারভিউয়ের মাধ্যমে যাচাই করা হয়।"
+      },
+      {
+        "qEn": "Can I choose the same doctor again?",
+        "qBn": "একই ডাক্তারকে আবার পছন্দ করা যাবে?",
+        "aEn": "Yes. Go to 'Recent providers' on Home, tap the doctor, and choose 'Request again'. We'll try to match the same provider when available.",
+        "aBn": "হ্যাঁ। Home-এর 'Recent providers' থেকে ডাক্তার নির্বাচন করে 'Request again' চাপুন। সম্ভব হলে সেই একই ডাক্তারকেই অ্যাসাইন করা হবে।"
+      }
+    ]
+  },
+  {
+    "categoryEn": "Support",
+    "categoryBn": "সহায়তা",
+    "items": [
+      {
+        "qEn": "How do I reach support?",
+        "qBn": "সহায়তার জন্য কীভাবে যোগাযোগ করব?",
+        "aEn": "Use the Quick Help section on Home to call or email our support team between 9 AM and 9 PM (BST). Urgent medical issues should always be directed to your nearest emergency room first.",
+        "aBn": "Home-এর Quick Help থেকে সকাল ৯টা থেকে রাত ৯টা (BST) পর্যন্ত আমাদের সাপোর্ট টিমকে কল বা ইমেইল করতে পারেন। জরুরি চিকিৎসা প্রয়োজন হলে আগে নিকটস্থ ইমার্জেন্সিতে যান।"
+      }
+    ]
+  }
+]
