@@ -1,12 +1,15 @@
 import 'dart:typed_data';
 
 import 'package:cached_network_image/cached_network_image.dart';
+import 'package:dio/dio.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
+import '../../../../core/api/category_providers.dart';
 import '../../../../core/api/service_catalog_providers.dart';
+import '../../../../core/models/home_category.dart';
 import '../../../../core/models/service_catalog_item.dart';
 import '../../../../core/models/provider_type.dart';
 import '../../../../core/models/service_category.dart';
@@ -122,7 +125,7 @@ class _Header extends StatelessWidget {
         children: [
           const SizedBox(width: 56),
           Expanded(flex: 4, child: Text('TITLE', style: _headerStyle)),
-          Expanded(flex: 3, child: Text('CATEGORY', style: _headerStyle)),
+          Expanded(flex: 4, child: Text('HOME TABS', style: _headerStyle)),
           Expanded(flex: 3, child: Text('ATTENDED BY', style: _headerStyle)),
           Expanded(flex: 2, child: Text('PRICE', style: _headerStyle)),
           Expanded(flex: 2, child: Text('STATUS', style: _headerStyle)),
@@ -167,21 +170,13 @@ class _ServiceRow extends ConsumerWidget {
               ],
             ),
           ),
+          // Which Home tabs this service lands on — the mapping an operator
+          // came here to check. Shows the resolved slugs rather than the raw
+          // `category` string, because that is what the patient rail matches:
+          // a service can be tagged "Recovery" and still appear under Post-op.
           Expanded(
-            flex: 3,
-            child: item.category.isEmpty
-                ? Text('—', style: MtTextStyles.bodySm.copyWith(color: MtColors.ink3))
-                : Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: MtColors.brandSofter,
-                      borderRadius: BorderRadius.circular(6),
-                    ),
-                    child: Text(
-                      item.category,
-                      style: MtTextStyles.labelSm.copyWith(color: MtColors.brand700),
-                    ),
-                  ),
+            flex: 4,
+            child: _HomeTabsCell(item: item),
           ),
           // Who attends — the field that words the patient's tracker. An
           // inferred value is shown in parentheses so a row nobody has
@@ -281,6 +276,80 @@ class _ServiceRow extends ConsumerWidget {
   }
 }
 
+/// The Home tabs a service actually appears under, resolved the same way the
+/// patient rail resolves them.
+///
+/// Reads `categorySlugs` (server-computed) rather than the ids, so a service
+/// that reaches a pill through the legacy free-text `category` shows the pill
+/// it lands on instead of an empty cell — which is the exact question this
+/// column exists to answer. An "urgent" flag rides along, since it is the other
+/// thing that decides whether a patient's filter finds this row.
+class _HomeTabsCell extends ConsumerWidget {
+  final ServiceCatalogItem item;
+  const _HomeTabsCell({required this.item});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final categories =
+        ref.watch(allCategoriesProvider).valueOrNull ?? const <HomeCategory>[];
+    // Slug → the admin's own label, so the cell reads "Post-op", not "post-op".
+    final labels = [
+      for (final slug in item.categorySlugs)
+        categories
+                .where((c) => c.slug == slug)
+                .map((c) => c.nameEn)
+                .firstOrNull ??
+            slug,
+    ];
+
+    if (labels.isEmpty && !item.isUrgentAvailable) {
+      return Text(
+        'All only',
+        style: MtTextStyles.bodySm.copyWith(color: MtColors.ink3),
+      );
+    }
+
+    return Wrap(
+      spacing: 6,
+      runSpacing: 4,
+      children: [
+        for (final label in labels)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: MtColors.brandSofter,
+              borderRadius: BorderRadius.circular(6),
+            ),
+            child: Text(
+              label,
+              style: MtTextStyles.labelSm.copyWith(color: MtColors.brand700),
+            ),
+          ),
+        if (item.isUrgentAvailable)
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: MtColors.surface2,
+              borderRadius: BorderRadius.circular(6),
+              border: Border.all(color: MtColors.line),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Icon(Icons.bolt_rounded, size: 12, color: MtColors.ink2),
+                const SizedBox(width: 3),
+                Text(
+                  'Urgent',
+                  style: MtTextStyles.labelSm.copyWith(color: MtColors.ink2),
+                ),
+              ],
+            ),
+          ),
+      ],
+    );
+  }
+}
+
 class _Thumb extends StatelessWidget {
   final String? url;
   const _Thumb({required this.url});
@@ -374,6 +443,24 @@ class _ServiceFormDialogState extends ConsumerState<_ServiceFormDialog> {
   /// to blank the moment someone opens the form to change its price.
   String _legacyCategory = '';
 
+  /// The Home pills this service is assigned to — the field behind "which
+  /// category tab does this show up under". Multi-select: a service can
+  /// legitimately be both post-op care and a doctor visit.
+  ///
+  /// A `Set` so ticking is idempotent and order can't matter; the API treats
+  /// the first entry as primary only for the card badge.
+  final Set<String> _categoryIds = {};
+
+  /// True once [_categoryIds] was seeded from the legacy free-text category
+  /// rather than read off the service. Surfaced in the form so an operator
+  /// knows the ticks are a proposal they are about to make permanent, not
+  /// something already stored.
+  bool _seededFromLegacy = false;
+
+  /// Can this be dispatched as an urgent/same-day visit? Drives the patient
+  /// category view's "Urgent available" filter.
+  bool _isUrgentAvailable = false;
+
   /// Who attends this service. Null = untagged, which is a real state: the API
   /// then infers a role from the title/category on every read. The form shows
   /// what that inference currently produces so the admin can confirm it in one
@@ -408,7 +495,45 @@ class _ServiceFormDialogState extends ConsumerState<_ServiceFormDialog> {
       _legacyCategory = raw;
       _category = raw; // select it, so nothing is dropped behind the admin's back
     }
+
+    _isUrgentAvailable = e?.isUrgentAvailable ?? false;
+    _categoryIds.addAll(e?.categoryIds ?? const []);
+    // A service that has never been explicitly assigned currently reaches its
+    // pill through the legacy free-text join. Pre-tick whatever it matches
+    // today, so an operator who opens this form to change a price and saves
+    // doesn't silently move the service somewhere else. `_seededFromLegacy`
+    // makes that pre-tick visible rather than a hidden default.
+    if (_categoryIds.isEmpty && e != null && e.categorySlugs.isNotEmpty) {
+      _seededFromLegacy = true;
+    }
   }
+
+  /// Applies the pre-tick described in [initState], once the category list has
+  /// actually loaded.
+  ///
+  /// Deferred to a post-frame callback because it lands during a build: the
+  /// categories arrive asynchronously, so the earliest this can run is the
+  /// frame that first renders them, and `setState` is illegal there.
+  /// [_seededFromLegacy] deliberately stays true — the ticks are a proposal
+  /// until the operator saves, and the form says so.
+  void _maybeSeedCategories(List<HomeCategory> categories) {
+    if (!_seededFromLegacy || _seedApplied) return;
+    _seedApplied = true;
+    final slugs = widget.existing?.categorySlugs ?? const <String>[];
+    final seed = {
+      for (final c in categories)
+        if (slugs.contains(c.slug)) c.id,
+    };
+    if (seed.isEmpty) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      setState(() => _categoryIds.addAll(seed));
+    });
+  }
+
+  /// One-shot latch for [_maybeSeedCategories] — without it every rebuild
+  /// would re-tick a pill the operator had just cleared.
+  bool _seedApplied = false;
 
   @override
   void dispose() {
@@ -473,6 +598,8 @@ class _ServiceFormDialogState extends ConsumerState<_ServiceFormDialog> {
           price: double.parse(_price.text.trim()),
           description: _description.text.trim(),
           category: _category,
+          categoryIds: _categoryIds.toList(),
+          isUrgentAvailable: _isUrgentAvailable,
           providerType: _providerType,
           providerTypeSource: existing.providerTypeSource,
           duration: duration,
@@ -488,6 +615,8 @@ class _ServiceFormDialogState extends ConsumerState<_ServiceFormDialog> {
           price: double.parse(_price.text.trim()),
           description: _description.text.trim(),
           category: _category,
+          categoryIds: _categoryIds.toList(),
+          isUrgentAvailable: _isUrgentAvailable,
           providerType: _providerType,
           duration: duration,
           status: _status,
@@ -565,11 +694,30 @@ class _ServiceFormDialogState extends ConsumerState<_ServiceFormDialog> {
                   maxLines: 3,
                 ),
                 const SizedBox(height: 12),
-                _Label('Category'),
+                // Distinct from 'Home categories' below on purpose: this is the
+                // legacy free-text field that only decides placement when no
+                // pill is picked, and two controls both labelled "Category" is
+                // the confusion the combobox below exists to end.
+                _Label('Catalog category (legacy)'),
                 _CategoryDropdown(
                   value: _category,
                   legacyValue: _legacyCategory,
                   onChanged: (v) => setState(() => _category = v),
+                ),
+                const SizedBox(height: 12),
+                _Label('Home categories'),
+                _CategoryCombobox(
+                  selected: _categoryIds,
+                  inherited: _seededFromLegacy,
+                  onCategoriesLoaded: _maybeSeedCategories,
+                  onChanged: (ids) => setState(() {
+                    _categoryIds
+                      ..clear()
+                      ..addAll(ids);
+                    // Once the operator touches the ticks they own them; the
+                    // "inherited from the old category field" note goes away.
+                    _seededFromLegacy = false;
+                  }),
                 ),
                 const SizedBox(height: 12),
                 _Label('Attended by'),
@@ -584,7 +732,22 @@ class _ServiceFormDialogState extends ConsumerState<_ServiceFormDialog> {
                   controller: _duration,
                   hint: 'Optional, e.g. 30 min',
                 ),
-                const SizedBox(height: 16),
+                const SizedBox(height: 8),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Urgent available', style: MtTextStyles.labelLg),
+                  subtitle: Text(
+                    _isUrgentAvailable
+                        ? 'Listed under the "Urgent available" filter on the '
+                            'patient category view'
+                        : 'Only bookable on the normal schedule',
+                    style: MtTextStyles.bodySm.copyWith(color: MtColors.ink3),
+                  ),
+                  value: _isUrgentAvailable,
+                  activeColor: MtColors.brand,
+                  onChanged: (v) => setState(() => _isUrgentAvailable = v),
+                ),
+                const SizedBox(height: 8),
                 SwitchListTile(
                   contentPadding: EdgeInsets.zero,
                   title: const Text('Active', style: MtTextStyles.labelLg),
@@ -743,6 +906,9 @@ class _Field extends StatelessWidget {
   final int maxLines;
   final TextInputType? keyboardType;
   final String? Function(String?)? validator;
+  /// Fires per keystroke — used by the quick-create dialog to notice that the
+  /// operator has taken the slug over from its auto-generated value.
+  final ValueChanged<String>? onChanged;
 
   const _Field({
     required this.controller,
@@ -750,6 +916,7 @@ class _Field extends StatelessWidget {
     this.maxLines = 1,
     this.keyboardType,
     this.validator,
+    this.onChanged,
   });
 
   @override
@@ -759,6 +926,7 @@ class _Field extends StatelessWidget {
       maxLines: maxLines,
       keyboardType: keyboardType,
       validator: validator,
+      onChanged: onChanged,
       style: MtTextStyles.bodyMd,
       decoration: _fieldDecoration(hint: hint),
     );
@@ -826,6 +994,505 @@ class _CategoryDropdown extends StatelessWidget {
       ],
     );
   }
+}
+
+/// One row in the combobox dropdown: an existing pill, or the inline
+/// "create it now" action that closes the dead end when nothing matches.
+sealed class _CategoryOption {
+  const _CategoryOption();
+}
+
+class _ExistingCategoryOption extends _CategoryOption {
+  final HomeCategory category;
+  const _ExistingCategoryOption(this.category);
+}
+
+class _CreateCategoryOption extends _CategoryOption {
+  final String query;
+  const _CreateCategoryOption(this.query);
+}
+
+/// Searchable multi-select for the Home pills a service appears under — the
+/// mapping behind "tap Post-op on Home and see these services".
+///
+/// Multi-select rather than a single dropdown because the relationship really
+/// is many-to-many: post-operative physiotherapy delivered by a visiting doctor
+/// belongs on both tabs, and forcing a single choice pushes operators into
+/// duplicating the service instead. (The API accepts a singular `category_id`
+/// on write for spec compatibility, but folds it into the same array.)
+///
+/// Replaces the wall of tick-capsules this used to render. Two rails' worth of
+/// pills is a lot to scan, and the capsules had no answer at all for the common
+/// case of "the category I need doesn't exist yet" — the operator had to
+/// abandon a half-filled service form, go to Home → Categories, create it, and
+/// start over. Typing a name that matches nothing now offers
+/// `+ Create "<name>"` as the last row of the dropdown.
+///
+/// **Assignment here is authoritative.** Once any pill is picked, the legacy
+/// free-text `Catalog category` field above stops deciding where the service
+/// shows up (`resolveCategorySlugs` in the API). That is deliberate — otherwise
+/// removing a pill would be a no-op — and it is why an unassigned service is
+/// pre-filled from its current legacy match rather than opening empty.
+class _CategoryCombobox extends ConsumerStatefulWidget {
+  final Set<String> selected;
+
+  /// True when the current picks were inherited from the legacy `category`
+  /// field rather than read off the service — the form says so out loud.
+  final bool inherited;
+
+  /// Fired with the live category list on every build, so the parent (which
+  /// owns the selection and the save) can run its one-shot legacy seed.
+  final ValueChanged<List<HomeCategory>> onCategoriesLoaded;
+
+  final ValueChanged<Set<String>> onChanged;
+
+  const _CategoryCombobox({
+    required this.selected,
+    required this.inherited,
+    required this.onCategoriesLoaded,
+    required this.onChanged,
+  });
+
+  @override
+  ConsumerState<_CategoryCombobox> createState() => _CategoryComboboxState();
+}
+
+class _CategoryComboboxState extends ConsumerState<_CategoryCombobox> {
+  void _add(String id) => widget.onChanged({...widget.selected, id});
+
+  void _remove(String id) =>
+      widget.onChanged({...widget.selected}..remove(id));
+
+  Future<void> _handle(_CategoryOption option) async {
+    switch (option) {
+      case _ExistingCategoryOption(:final category):
+        _add(category.id);
+      case _CreateCategoryOption(:final query):
+        final created = await showDialog<HomeCategory>(
+          context: context,
+          builder: (_) => _QuickCreateCategoryDialog(initialName: query),
+        );
+        // Guarded: `onChanged` reaches the service form's setState, and the
+        // create dialog is an await during which that form could have gone.
+        if (created == null || !mounted) return;
+        // The repository refetches on create, so the new pill is already in
+        // `allCategoriesProvider` by the time this resolves — selecting it by
+        // id is enough to make it show as a chip.
+        _add(created.id);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final async = ref.watch(allCategoriesProvider);
+
+    return async.when(
+      loading: () => const Padding(
+        padding: EdgeInsets.symmetric(vertical: 12),
+        child: SizedBox(
+          height: 20,
+          width: 20,
+          child: CircularProgressIndicator(strokeWidth: 2),
+        ),
+      ),
+      error: (e, _) => Text(
+        "Couldn't load categories: $e",
+        style: MtTextStyles.bodySm.copyWith(color: MtColors.rejected),
+      ),
+      data: (categories) {
+        // The parent owns the selection, so it also owns the one-shot legacy
+        // seed — it is the only place that knows whether the operator has
+        // since touched the picks, and it defers the actual mutation past
+        // this build.
+        widget.onCategoriesLoaded(categories);
+
+        final byId = {for (final c in categories) c.id: c};
+        // Selected ids that resolve to nothing are dropped rather than rendered
+        // as a blank chip: the pill was deleted while this form was open, and
+        // the API drops it on the next save anyway.
+        final chosen = [
+          for (final id in widget.selected)
+            if (byId[id] != null) byId[id]!,
+        ];
+
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            RawAutocomplete<_CategoryOption>(
+              // Always empty: the field is a search box, not a display of the
+              // current value (the chips below are). RawAutocomplete writes
+              // this back into the field on selection, which is what clears the
+              // query for the next pick — this being a multi-select, leaving
+              // "Post-op" in the box would filter the next search to nothing.
+              displayStringForOption: (_) => '',
+              optionsBuilder: (value) => _optionsFor(value.text, categories),
+              onSelected: _handle,
+              fieldViewBuilder: (context, controller, focusNode, onSubmit) {
+                return TextField(
+                  controller: controller,
+                  focusNode: focusNode,
+                  style: MtTextStyles.bodyMd,
+                  decoration: _fieldDecoration(
+                    hint: categories.isEmpty
+                        ? 'Type a name to create the first category'
+                        : 'Search categories, or type a new name',
+                  ).copyWith(
+                    prefixIcon:
+                        const Icon(Icons.search, size: 20, color: MtColors.ink3),
+                  ),
+                );
+              },
+              optionsViewBuilder: (context, onSelected, options) {
+                return Align(
+                  alignment: Alignment.topLeft,
+                  child: Material(
+                    elevation: 4,
+                    borderRadius: BorderRadius.circular(10),
+                    child: SizedBox(
+                      width: 460,
+                      height: options.length > 4 ? 240 : options.length * 60,
+                      child: ListView.builder(
+                        padding: EdgeInsets.zero,
+                        itemCount: options.length,
+                        itemBuilder: (context, i) => _CategoryOptionTile(
+                          option: options.elementAt(i),
+                          onTap: () => onSelected(options.elementAt(i)),
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+            if (chosen.isNotEmpty) ...[
+              const SizedBox(height: 10),
+              Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  for (final c in chosen)
+                    Chip(
+                      label: Text(
+                        // A hidden pill stays assignable — the service
+                        // reappears the moment it is un-hidden — but an
+                        // operator should know patients can't see that tab.
+                        c.isActive ? c.nameEn : '${c.nameEn} (hidden)',
+                      ),
+                      labelStyle: MtTextStyles.labelSm.copyWith(
+                        color: c.isActive ? MtColors.brand700 : MtColors.ink2,
+                      ),
+                      backgroundColor:
+                          c.isActive ? MtColors.brandSofter : MtColors.surface2,
+                      side: BorderSide(
+                        color: c.isActive ? MtColors.brand : MtColors.line,
+                      ),
+                      onDeleted: () => _remove(c.id),
+                    ),
+                ],
+              ),
+            ],
+            const SizedBox(height: 6),
+            Text(
+              chosen.isEmpty
+                  ? 'Not assigned — this service appears under the "All" tab '
+                      'only, unless its Catalog category above happens to '
+                      'match a pill.'
+                  : widget.inherited
+                      ? 'Inherited from the Catalog category field above — '
+                          'this is where the service shows today. Saving makes '
+                          'it explicit, and from then on these picks decide.'
+                      : 'Shown under ${chosen.length} '
+                          '${chosen.length == 1 ? 'tab' : 'tabs'} on '
+                          'the patient Home screen.',
+              style: MtTextStyles.bodySm.copyWith(
+                color: widget.inherited ? MtColors.brand700 : MtColors.ink3,
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  /// Matching pills, then the inline create action.
+  ///
+  /// The action is withheld when an existing category already carries that
+  /// name or would mint the same slug — `POST /api/categories` 409s on a
+  /// duplicate slug, and offering a button whose only outcome is an error is
+  /// worse than not offering it. Already-picked pills drop out of the list so
+  /// the dropdown only ever shows something that changes the selection.
+  List<_CategoryOption> _optionsFor(String raw, List<HomeCategory> categories) {
+    final query = raw.trim();
+    final q = query.toLowerCase();
+    final matches = [
+      for (final c in categories)
+        if (!widget.selected.contains(c.id) &&
+            (q.isEmpty ||
+                c.nameEn.toLowerCase().contains(q) ||
+                (c.nameBn ?? '').toLowerCase().contains(q) ||
+                c.slug.contains(q)))
+          _ExistingCategoryOption(c),
+    ];
+    if (query.isEmpty) return matches;
+
+    final slug = categorySlugFor(query);
+    final duplicate = categories.any(
+      (c) => c.nameEn.toLowerCase() == q || (slug.isNotEmpty && c.slug == slug),
+    );
+    return [
+      ...matches,
+      if (!duplicate) _CreateCategoryOption(query),
+    ];
+  }
+}
+
+/// One dropdown row — an existing pill, or the `+ Create "…"` action rendered
+/// distinctly so it never reads as just another category.
+class _CategoryOptionTile extends StatelessWidget {
+  final _CategoryOption option;
+  final VoidCallback onTap;
+
+  const _CategoryOptionTile({required this.option, required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    switch (option) {
+      case _ExistingCategoryOption(:final category):
+        return ListTile(
+          dense: true,
+          leading: const Icon(Icons.label_outline, size: 20),
+          title: Text(category.nameEn),
+          subtitle: Text(
+            category.nameBn == null
+                ? category.slug
+                : '${category.nameBn}  ·  ${category.slug}',
+          ),
+          trailing: category.isActive
+              ? null
+              : Text(
+                  'hidden',
+                  style: MtTextStyles.labelSm.copyWith(color: MtColors.ink3),
+                ),
+          onTap: onTap,
+        );
+      case _CreateCategoryOption(:final query):
+        return ListTile(
+          dense: true,
+          leading: const Icon(Icons.add_circle_outline,
+              size: 20, color: MtColors.brand),
+          title: Text(
+            'Create "$query"',
+            style: MtTextStyles.labelMd.copyWith(color: MtColors.brand700),
+          ),
+          subtitle: Text(
+            'New Home category · /${categorySlugFor(query)}',
+            style: MtTextStyles.bodySm.copyWith(color: MtColors.ink3),
+          ),
+          onTap: onTap,
+        );
+    }
+  }
+}
+
+/// Inline category creation, without leaving the half-filled service form.
+///
+/// Deliberately the short form — name, Bengali name, slug. Icon, description,
+/// and rail order are the full editor's job (Home → Categories); asking for
+/// them here would turn a two-second detour back into the context switch this
+/// exists to avoid. Everything omitted takes the API's own defaults, including
+/// `displayOrder`, which lands the new pill at the end of the rail.
+class _QuickCreateCategoryDialog extends ConsumerStatefulWidget {
+  /// What the operator had typed into the combobox — the whole point of the
+  /// inline action is that they don't retype it.
+  final String initialName;
+
+  const _QuickCreateCategoryDialog({required this.initialName});
+
+  @override
+  ConsumerState<_QuickCreateCategoryDialog> createState() =>
+      _QuickCreateCategoryDialogState();
+}
+
+class _QuickCreateCategoryDialogState
+    extends ConsumerState<_QuickCreateCategoryDialog> {
+  final _formKey = GlobalKey<FormState>();
+  late final TextEditingController _nameEn;
+  late final TextEditingController _nameBn;
+  late final TextEditingController _slug;
+
+  /// Stops mirroring [_nameEn] into [_slug] once the operator edits the slug
+  /// themselves — the auto-generated value is a convenience, not a lock.
+  bool _slugEdited = false;
+  bool _saving = false;
+
+  /// Server-side rejection (a 409 on a slug that already exists, most often),
+  /// shown against the slug field rather than as a toast that disappears while
+  /// they are still looking at the form.
+  String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    _nameEn = TextEditingController(text: widget.initialName);
+    _nameBn = TextEditingController();
+    _slug = TextEditingController(text: categorySlugFor(widget.initialName));
+    _nameEn.addListener(_syncSlug);
+  }
+
+  void _syncSlug() {
+    if (_slugEdited) return;
+    final next = categorySlugFor(_nameEn.text);
+    if (next == _slug.text) return;
+    _slug.text = next;
+  }
+
+  @override
+  void dispose() {
+    _nameEn.removeListener(_syncSlug);
+    _nameEn.dispose();
+    _nameBn.dispose();
+    _slug.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    if (!_formKey.currentState!.validate()) return;
+    setState(() {
+      _saving = true;
+      _error = null;
+    });
+    final bn = _nameBn.text.trim();
+    try {
+      final created = await ref.read(categoryRepositoryProvider).create(
+            HomeCategory(
+              id: '',
+              nameEn: _nameEn.text.trim(),
+              nameBn: bn.isEmpty ? null : bn,
+              slug: _slug.text.trim(),
+            ),
+          );
+      if (!mounted) return;
+      Navigator.of(context).pop(created);
+    } catch (e) {
+      // Kept open on failure so a duplicate slug can be corrected in place.
+      if (!mounted) return;
+      setState(() {
+        _saving = false;
+        _error = _categoryErrorMessage(e);
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      child: SizedBox(
+        width: 420,
+        child: Form(
+          key: _formKey,
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text('New Home category', style: MtTextStyles.h2),
+                const SizedBox(height: 4),
+                Text(
+                  'Creates the pill and assigns this service to it. You can add '
+                  'an icon, description and rail order later under Home → '
+                  'Categories.',
+                  style: MtTextStyles.bodySm.copyWith(color: MtColors.ink2),
+                ),
+                const SizedBox(height: 20),
+                _Label('Category name (English)'),
+                _Field(
+                  controller: _nameEn,
+                  hint: 'e.g. Nursing',
+                  validator: (v) => (v == null || v.trim().isEmpty)
+                      ? 'Name is required'
+                      : null,
+                ),
+                const SizedBox(height: 12),
+                _Label('Category name (Bengali)'),
+                _Field(controller: _nameBn, hint: 'Optional, e.g. নার্সিং'),
+                const SizedBox(height: 12),
+                _Label('Slug'),
+                _Field(
+                  controller: _slug,
+                  hint: 'e.g. nursing',
+                  onChanged: (_) => _slugEdited = true,
+                  validator: (v) {
+                    final s = (v ?? '').trim();
+                    if (s.isEmpty) return 'Slug is required';
+                    // Mirrors SAFE_SLUG in backend/src/routes/categories.js —
+                    // anything else could never match a service and would come
+                    // back as a 400 after a round trip.
+                    if (!RegExp(r'^[a-z0-9]+(?:-[a-z0-9]+)*$').hasMatch(s)) {
+                      return 'Lowercase letters, digits and single hyphens';
+                    }
+                    return null;
+                  },
+                ),
+                const SizedBox(height: 6),
+                Text(
+                  'The join key patients filter by. Generated from the English '
+                  'name — edit it only if you know what it has to match.',
+                  style: MtTextStyles.bodySm.copyWith(color: MtColors.ink3),
+                ),
+                if (_error != null) ...[
+                  const SizedBox(height: 10),
+                  Text(
+                    _error!,
+                    style:
+                        MtTextStyles.bodySm.copyWith(color: MtColors.rejected),
+                  ),
+                ],
+                const SizedBox(height: 20),
+                Row(
+                  children: [
+                    Expanded(
+                      child: MtButton(
+                        label: 'Cancel',
+                        isOutlined: true,
+                        onPressed:
+                            _saving ? () {} : () => Navigator.of(context).pop(),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: MtButton(
+                        label: 'Create',
+                        leadingIcon: Icons.check,
+                        isLoading: _saving,
+                        // `_saving` guards the double-click that would
+                        // otherwise fire two POSTs, the second colliding with
+                        // the unique slug index the first just claimed.
+                        onPressed: _saving ? () {} : _save,
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// Prefers the backend's own message ("A category with slug \"x\" already
+/// exists") over Dio's generic transport copy.
+String _categoryErrorMessage(Object error) {
+  if (error is DioException) {
+    final data = error.response?.data;
+    if (data is Map && data['message'] is String) {
+      return data['message'] as String;
+    }
+  }
+  return 'Could not create the category: $error';
 }
 
 /// Picker for who attends a service — the field that words the patient's

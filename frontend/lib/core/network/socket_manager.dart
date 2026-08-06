@@ -70,6 +70,7 @@ class SocketManager {
   final _ledgerClears = StreamController<Map<String, dynamic>>.broadcast();
   final _careLogs = StreamController<Map<String, dynamic>>.broadcast();
   final _paymentPrefs = StreamController<Map<String, dynamic>>.broadcast();
+  final _paymentUpdates = StreamController<Map<String, dynamic>>.broadcast();
   final _walletUpdates = StreamController<Map<String, dynamic>>.broadcast();
   final _bookingMilestones =
       StreamController<Map<String, dynamic>>.broadcast();
@@ -140,6 +141,21 @@ class SocketManager {
   /// patient's own surfaces refresh, without waiting out the poll.
   Stream<Map<String, dynamic>> get onPaymentPreferenceUpdated =>
       _paymentPrefs.stream;
+
+  /// `booking:payment_updated` events — the canonical balance-payment posture
+  /// of a booking changed: the patient switched their remaining-balance
+  /// method, the gateway settled the balance online, or a provider collected
+  /// it in cash. Payload `{event: 'BOOKING_PAYMENT_UPDATED', bookingId,
+  /// appointmentId, paymentMethod: ONLINE|CASH, paymentStatus: PAID|PENDING,
+  /// remainingBalance, cashCollectable, bookingStatus, reason}`.
+  ///
+  /// Delivered to the patient's user room, the booking room, the assigned
+  /// doctor AND nurse, and the admin role room. This is what lets a clinical
+  /// console tear down a live "Collect Cash · Required" sheet the instant the
+  /// patient pays online, instead of leaving the provider to tap Confirm and
+  /// hit the server's "not awaiting its balance payment" rejection.
+  Stream<Map<String, dynamic>> get onBookingPaymentUpdated =>
+      _paymentUpdates.stream;
 
   /// `booking:status_updated` events — an admin advanced the booking to a new
   /// patient-facing milestone (or edited the scheduled appointment time);
@@ -238,6 +254,11 @@ class SocketManager {
       _paymentPrefs.add(Map<String, dynamic>.from(payload));
     });
 
+    socket.on('booking:payment_updated', (payload) {
+      if (_disposed || payload is! Map) return;
+      _paymentUpdates.add(Map<String, dynamic>.from(payload));
+    });
+
     socket.on('wallet_updated', (payload) {
       if (_disposed || payload is! Map) return;
       _walletUpdates.add(Map<String, dynamic>.from(payload));
@@ -268,6 +289,7 @@ class SocketManager {
         socket.off('nurse_care_log_submitted');
         socket.off('cash_ledger_cleared');
         socket.off('payment_preference_updated');
+        socket.off('booking:payment_updated');
         socket.off('wallet_updated');
         socket.off('booking:status_updated');
         socket.disconnect();
@@ -287,6 +309,7 @@ class SocketManager {
     _ledgerClears.close();
     _careLogs.close();
     _paymentPrefs.close();
+    _paymentUpdates.close();
     _walletUpdates.close();
     _bookingMilestones.close();
   }

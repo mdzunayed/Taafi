@@ -1,4 +1,5 @@
 import 'package:equatable/equatable.dart';
+import 'booking_attachment.dart';
 import 'service.dart';
 
 // ─── KPI Dashboard ───────────────────────────────────────────────────────────
@@ -146,6 +147,49 @@ class AdminCareRequest extends Equatable {
   /// which carries the patient's `condition_note`.
   final String? adminNote;
 
+  /// What this booking ACTUALLY paid as its confirmation deposit, snapshotted
+  /// server-side at settlement. 0 for legacy rows that predate the deposit
+  /// gate — and 0 is the correct credit for those: the fee validation here
+  /// mirrors the backend's `fee − deposit_amount − discount`, so assuming a
+  /// deposit that was never paid would quote an outstanding balance the
+  /// backend then refuses.
+  final double depositAmount;
+
+  /// The patient's upfront settlement choice — `'CASH_ON_SERVICE'` or
+  /// `'DIGITAL'` (null on bookings made before the choice existed, treated
+  /// as digital). Drives which bookings get the admin's "Verify Online
+  /// Payment & Release Prescription" action: a cash booking releases itself
+  /// when the provider confirms collection, so it never needs one.
+  final String? paymentPreference;
+
+  /// The deposit the admin COMMITTED for this booking on the review call, or
+  /// null before it. Distinct from [depositAmount], which is what has actually
+  /// been collected — this is the number the console re-renders when an admin
+  /// reopens a booking they already quoted, and the one the patient is being
+  /// asked for right now.
+  final double? requiredDeposit;
+
+  /// Phase 4 verification state of the remaining balance:
+  /// `PENDING` / `PENDING_ADMIN_VERIFICATION` / `VERIFIED`. The Finance &
+  /// Billing queue is exactly the set of bookings sitting in the middle value.
+  final String remainingPaymentStatus;
+
+  /// The gateway transaction reference the admin reconciles an online payment
+  /// against before unlocking the prescription. Null for cash bookings.
+  final String? remainingPaymentReference;
+
+  /// Whether this visit's prescription has been released to the patient.
+  final bool prescriptionUnlocked;
+
+  /// Previous medical documents the patient attached at booking time, each
+  /// with a presigned, expiring URL. Read by the assignment surfaces so an
+  /// admin can check a discharge summary BEFORE dispatching a provider.
+  ///
+  /// Empty both when the patient attached nothing and when the payload
+  /// predates the field — the console shows the same "none attached" label
+  /// either way, which is the honest thing to say in both cases.
+  final List<BookingAttachment> attachments;
+
   const AdminCareRequest({
     required this.id,
     required this.patientId,
@@ -172,16 +216,39 @@ class AdminCareRequest extends Equatable {
     this.assignedHelperName,
     required this.patientOffer,
     this.adjustedPrice,
+    this.depositAmount = 0,
     this.marketPriceMin,
     this.marketPriceMax,
     this.notes,
     this.phone,
     this.adminNote,
+    this.paymentPreference,
+    this.requiredDeposit,
+    this.remainingPaymentStatus = 'PENDING',
+    this.remainingPaymentReference,
+    this.prescriptionUnlocked = false,
+    this.attachments = const [],
   });
 
   bool get isPending => status == 'pending';
   bool get isApproved => status == 'approved';
   bool get isRejected => status == 'rejected';
+
+  /// True when the patient committed to handing cash to the provider.
+  /// Everything else (including an unset preference) settles online.
+  bool get isCashOnService => paymentPreference == 'CASH_ON_SERVICE';
+
+  /// PHASE 2 — the admin has already committed a fee and a deposit, and the
+  /// patient has not paid it yet. The console shows the quote as pending
+  /// rather than offering to set it again from scratch.
+  bool get isAwaitingDepositPayment =>
+      status == 'deposit_required' ||
+      ((requiredDeposit ?? 0) > 0 && depositAmount <= 0);
+
+  /// PHASE 4, CHANNEL B — an online balance payment is waiting on this admin
+  /// to reconcile it. Exactly the Finance & Billing verification queue.
+  bool get needsPaymentVerification =>
+      remainingPaymentStatus == 'PENDING_ADMIN_VERIFICATION';
   bool get isUrgent =>
       urgencyLevel == UrgencyLevel.high ||
       urgencyLevel == UrgencyLevel.critical;
@@ -193,6 +260,10 @@ class AdminCareRequest extends Equatable {
     String? assignedHelperId,
     String? assignedHelperName,
     double? adjustedPrice,
+    double? depositAmount,
+    double? requiredDeposit,
+    String? remainingPaymentStatus,
+    bool? prescriptionUnlocked,
     UrgencyLevel? urgencyLevel,
     String? adminNote,
   }) {
@@ -222,11 +293,19 @@ class AdminCareRequest extends Equatable {
       assignedHelperName: assignedHelperName ?? this.assignedHelperName,
       patientOffer: patientOffer,
       adjustedPrice: adjustedPrice ?? this.adjustedPrice,
+      depositAmount: depositAmount ?? this.depositAmount,
+      requiredDeposit: requiredDeposit ?? this.requiredDeposit,
+      remainingPaymentStatus:
+          remainingPaymentStatus ?? this.remainingPaymentStatus,
+      remainingPaymentReference: remainingPaymentReference,
+      prescriptionUnlocked: prescriptionUnlocked ?? this.prescriptionUnlocked,
       marketPriceMin: marketPriceMin,
       marketPriceMax: marketPriceMax,
       notes: notes,
       phone: phone,
       adminNote: adminNote ?? this.adminNote,
+      paymentPreference: paymentPreference,
+      attachments: attachments,
     );
   }
 
@@ -257,11 +336,18 @@ class AdminCareRequest extends Equatable {
         assignedHelperName,
         patientOffer,
         adjustedPrice,
+        depositAmount,
+        requiredDeposit,
+        remainingPaymentStatus,
+        remainingPaymentReference,
+        prescriptionUnlocked,
         marketPriceMin,
         marketPriceMax,
         notes,
         phone,
         adminNote,
+        paymentPreference,
+        attachments,
       ];
 
   factory AdminCareRequest.fromJson(Map<String, dynamic> json) {
@@ -294,11 +380,33 @@ class AdminCareRequest extends Equatable {
       assignedHelperName: json['assignedHelperName']?.toString(),
       patientOffer: ((json['patientOffer'] as num?) ?? 0).toDouble(),
       adjustedPrice: (json['adjustedPrice'] as num?)?.toDouble(),
+      depositAmount: ((json['depositAmount'] ?? json['deposit_amount']) as num?)
+              ?.toDouble() ??
+          0,
+      requiredDeposit: ((json['requiredDeposit'] ??
+              json['required_deposit'] ??
+              json['deposit_required_amount']) as num?)
+          ?.toDouble(),
+      remainingPaymentStatus: (json['remainingPaymentStatus'] ??
+                  json['remaining_payment_status'])
+              ?.toString() ??
+          'PENDING',
+      remainingPaymentReference: (json['remainingPaymentReference'] ??
+              json['remaining_payment_reference'])
+          ?.toString(),
+      prescriptionUnlocked:
+          (json['prescriptionUnlocked'] ?? json['prescription_unlocked']) ==
+              true,
       marketPriceMin: (json['marketPriceMin'] as num?)?.toDouble(),
       marketPriceMax: (json['marketPriceMax'] as num?)?.toDouble(),
       notes: json['notes']?.toString(),
       phone: json['phone']?.toString(),
       adminNote: json['adminNote']?.toString(),
+      // Wire is snake_case straight off Mongo on most admin surfaces; accept
+      // camelCase too so either shape parses.
+      paymentPreference:
+          (json['paymentPreference'] ?? json['payment_preference'])?.toString(),
+      attachments: BookingAttachment.listFrom(json['attachments']),
     );
   }
 
@@ -566,6 +674,15 @@ class RequestFilter extends Equatable {
   /// is still honoured for high/critical and stays independent of this set).
   final Set<UrgencyLevel> urgencyLevels;
 
+  /// Match *any* of these statuses. [statusFilter] only ever matches one
+  /// value, which cannot express a stage that spans several backend states —
+  /// "awaiting payment" covers both the legacy
+  /// `amount_assigned_awaiting_final_payment` and the pay-after-service
+  /// `service_completed_awaiting_final_payment`. Empty = no narrow. Applied
+  /// on top of [statusFilter] rather than instead of it, so the two never
+  /// fight: a chip sets one and clears the other.
+  final Set<String> statusAnyOf;
+
   const RequestFilter({
     this.statusFilter,
     this.serviceTypeFilter,
@@ -573,6 +690,7 @@ class RequestFilter extends Equatable {
     this.searchQuery = '',
     this.urgencyOnly = false,
     this.urgencyLevels = const {},
+    this.statusAnyOf = const {},
   });
 
   RequestFilter copyWith({
@@ -582,6 +700,7 @@ class RequestFilter extends Equatable {
     String? searchQuery,
     bool? urgencyOnly,
     Set<UrgencyLevel>? urgencyLevels,
+    Set<String>? statusAnyOf,
   }) {
     return RequestFilter(
       statusFilter:
@@ -593,6 +712,7 @@ class RequestFilter extends Equatable {
       searchQuery: searchQuery ?? this.searchQuery,
       urgencyOnly: urgencyOnly ?? this.urgencyOnly,
       urgencyLevels: urgencyLevels ?? this.urgencyLevels,
+      statusAnyOf: statusAnyOf ?? this.statusAnyOf,
     );
   }
 
@@ -611,6 +731,7 @@ class RequestFilter extends Equatable {
         searchQuery,
         urgencyOnly,
         urgencyLevels,
+        statusAnyOf,
       ];
 }
 

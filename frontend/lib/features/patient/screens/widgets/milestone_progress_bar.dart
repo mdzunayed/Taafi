@@ -17,16 +17,27 @@ class MilestoneProgressBar extends StatelessWidget {
   final MilestoneStyle style;
   final double height;
 
+  /// 1-based step to fill up to, when the caller groups the lifecycle
+  /// differently from the server's milestones.
+  ///
+  /// The Active Care tracker splits the deposit gate out of `REQUESTED` into
+  /// its own patient-facing step (see `ActiveCareStep`), so its bar has to
+  /// fill against that grouping — otherwise the rail and the timeline beneath
+  /// it report different positions for the same booking. Everything else
+  /// leaves this null and follows [milestone] directly.
+  final int? stepOverride;
+
   const MilestoneProgressBar({
     super.key,
     required this.milestone,
     required this.style,
     this.height = 6,
+    this.stepOverride,
   });
 
   @override
   Widget build(BuildContext context) {
-    final current = milestone.step;
+    final current = stepOverride ?? milestone.step;
     final cancelled = milestone == BookingMilestone.cancelled;
 
     return Row(

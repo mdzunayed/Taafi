@@ -47,6 +47,18 @@ class AdminSettings extends Equatable {
   final OperationalHours operationalHours;
   final String systemNotification;
 
+  // --- Finance ------------------------------------------------------------
+
+  /// Deposit charged to confirm a NEW care request. Snapshotted onto each
+  /// booking at creation, so changing it never re-prices one already in flight.
+  final double bookingDepositAmount;
+
+  /// Platform's cut of every completed visit, as a percentage of the gross fee.
+  final double platformCommissionPercent;
+
+  /// Ceiling on un-remitted cash a provider may hold before payouts lock.
+  final double cashInHandLimit;
+
   const AdminSettings({
     this.allowAutoAssignment = false,
     this.requireVerifiedDoctors = true,
@@ -54,6 +66,9 @@ class AdminSettings extends Equatable {
     this.betaCharts = false,
     this.operationalHours = const OperationalHours(),
     this.systemNotification = '',
+    this.bookingDepositAmount = 100,
+    this.platformCommissionPercent = 20,
+    this.cashInHandLimit = 5000,
   });
 
   static const empty = AdminSettings();
@@ -65,6 +80,9 @@ class AdminSettings extends Equatable {
     bool? betaCharts,
     OperationalHours? operationalHours,
     String? systemNotification,
+    double? bookingDepositAmount,
+    double? platformCommissionPercent,
+    double? cashInHandLimit,
   }) {
     return AdminSettings(
       allowAutoAssignment: allowAutoAssignment ?? this.allowAutoAssignment,
@@ -74,6 +92,10 @@ class AdminSettings extends Equatable {
       betaCharts: betaCharts ?? this.betaCharts,
       operationalHours: operationalHours ?? this.operationalHours,
       systemNotification: systemNotification ?? this.systemNotification,
+      bookingDepositAmount: bookingDepositAmount ?? this.bookingDepositAmount,
+      platformCommissionPercent:
+          platformCommissionPercent ?? this.platformCommissionPercent,
+      cashInHandLimit: cashInHandLimit ?? this.cashInHandLimit,
     );
   }
 
@@ -89,6 +111,11 @@ class AdminSettings extends Equatable {
           ? OperationalHours.fromJson(Map<String, dynamic>.from(hoursRaw))
           : const OperationalHours(),
       systemNotification: (json['system_notification'] ?? '').toString(),
+      bookingDepositAmount:
+          (json['booking_deposit_amount'] as num?)?.toDouble() ?? 100,
+      platformCommissionPercent:
+          (json['platform_commission_percent'] as num?)?.toDouble() ?? 20,
+      cashInHandLimit: (json['cash_in_hand_limit'] as num?)?.toDouble() ?? 5000,
     );
   }
 
@@ -100,6 +127,9 @@ class AdminSettings extends Equatable {
         'beta_charts': betaCharts,
         'operational_hours': operationalHours.toJson(),
         'system_notification': systemNotification,
+        'booking_deposit_amount': bookingDepositAmount,
+        'platform_commission_percent': platformCommissionPercent,
+        'cash_in_hand_limit': cashInHandLimit,
       };
 
   @override
@@ -110,5 +140,8 @@ class AdminSettings extends Equatable {
         betaCharts,
         operationalHours,
         systemNotification,
+        bookingDepositAmount,
+        platformCommissionPercent,
+        cashInHandLimit,
       ];
 }

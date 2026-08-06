@@ -146,11 +146,14 @@ void dispatchDynamicRoute(
     case 'activities':
       ref.goToActivities();
       return;
+    case 'activities:active_care':
+    // Retired routes. "Under Review" and "Service Status" were merged into
+    // Active Care, but these strings are stored in CMS home-section targets
+    // and shipped in old notification payloads — resolving them to the tab
+    // that now owns the booking keeps every existing link alive.
     case 'activities:under_review':
-      ref.goToActivities(sub: PatientActivitiesTab.underReview);
-      return;
     case 'activities:tracking':
-      ref.goToActivities(sub: PatientActivitiesTab.tracking);
+      ref.goToActivities(sub: PatientActivitiesTab.activeCare);
       return;
     case 'activities:history':
       ref.goToActivities(sub: PatientActivitiesTab.history);

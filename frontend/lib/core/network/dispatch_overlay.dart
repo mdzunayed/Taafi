@@ -47,13 +47,18 @@ class _DispatchOverlayHostState extends ConsumerState<DispatchOverlayHost> {
     });
   }
 
-  void _view(DispatchAlert alert) {
+  void _view() {
     HapticFeedback.lightImpact();
     ref.read(dispatchAlertProvider.notifier).dismiss();
     final user = ref.read(currentUserProvider);
     if (user != null) {
       ref.read(appRouterProvider).go(routeForUser(user));
     }
+  }
+
+  void _dismiss() {
+    HapticFeedback.lightImpact();
+    ref.read(dispatchAlertProvider.notifier).dismiss();
   }
 
   @override
@@ -65,13 +70,70 @@ class _DispatchOverlayHostState extends ConsumerState<DispatchOverlayHost> {
     // otherwise keep the (autoDispose) hub in scope. Without this, walking
     // into a chat could tear the chime source down.
     ref.watch(notificationProvider);
-    // Side-effects (haptic + auto-dismiss timer) on each new alert.
+    // Side-effects (haptic + auto-dismiss timer) on each new alert. Listening
+    // (rather than watching) also keeps the autoDispose alert provider alive
+    // without rebuilding the entire routed app under us on every dispatch —
+    // the banner layer below watches it and repaints on its own.
     ref.listen<DispatchAlert?>(dispatchAlertProvider, _onAlert);
-    final alert = ref.watch(dispatchAlertProvider);
 
     return Stack(
       children: [
         widget.child,
+        // This host is mounted from `MaterialApp.builder`, i.e. ABOVE the
+        // router's Navigator — so nothing here inherits the app's Overlay.
+        // Material widgets that float a layer (the dismiss button's Tooltip,
+        // ink splashes, any future menu) would throw "No Overlay widget
+        // found". Give the banner its own full-screen Overlay + Material so
+        // it is self-sufficient. It fills the Stack for layout only; neither
+        // the Overlay nor its Stack absorbs hit-tests, so taps outside the
+        // banner still reach the app underneath.
+        Positioned.fill(
+          child: _DispatchBannerLayer(onView: _view, onDismiss: _dismiss),
+        ),
+      ],
+    );
+  }
+}
+
+/// Owns the Overlay that the incoming-dispatch banner paints inside.
+///
+/// The single [OverlayEntry] is created once (`initialEntries` is only read on
+/// mount), so the entry deliberately does not close over the current alert —
+/// [_DispatchBanner] watches the provider itself and rebuilds in place.
+class _DispatchBannerLayer extends StatelessWidget {
+  final VoidCallback onView;
+  final VoidCallback onDismiss;
+  const _DispatchBannerLayer({required this.onView, required this.onDismiss});
+
+  @override
+  Widget build(BuildContext context) {
+    return Material(
+      type: MaterialType.transparency,
+      child: Overlay(
+        initialEntries: [
+          OverlayEntry(
+            builder: (context) =>
+                _DispatchBanner(onView: onView, onDismiss: onDismiss),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _DispatchBanner extends ConsumerWidget {
+  final VoidCallback onView;
+  final VoidCallback onDismiss;
+  const _DispatchBanner({required this.onView, required this.onDismiss});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final alert = ref.watch(dispatchAlertProvider);
+
+    // The overlay entry is laid out tight to the full screen; pin the banner
+    // to the top edge instead of letting it stretch/centre.
+    return Stack(
+      children: [
         Positioned(
           top: 0,
           left: 0,
@@ -93,11 +155,8 @@ class _DispatchOverlayHostState extends ConsumerState<DispatchOverlayHost> {
                   : _DispatchCard(
                       key: ValueKey(alert.appointmentId),
                       alert: alert,
-                      onView: () => _view(alert),
-                      onDismiss: () {
-                        HapticFeedback.lightImpact();
-                        ref.read(dispatchAlertProvider.notifier).dismiss();
-                      },
+                      onView: onView,
+                      onDismiss: onDismiss,
                     ),
             ),
           ),
@@ -167,6 +226,10 @@ class _DispatchCardState extends State<_DispatchCard>
           child: Padding(
             padding: const EdgeInsets.fromLTRB(14, 12, 8, 12),
             child: Row(
+              // Every child is either fixed-and-small or flexible, so the
+              // banner survives narrow phones and split-screen windows
+              // without painting the yellow overflow stripes.
+              mainAxisSize: MainAxisSize.min,
               children: [
                 Container(
                   width: 42,
@@ -186,6 +249,8 @@ class _DispatchCardState extends State<_DispatchCard>
                     children: [
                       Text(
                         'Incoming dispatch',
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
                         style: MtTextStyles.labelLg.copyWith(
                           color: Colors.white,
                           fontWeight: FontWeight.w800,
@@ -209,6 +274,8 @@ class _DispatchCardState extends State<_DispatchCard>
                   style: TextButton.styleFrom(
                     backgroundColor: Colors.white,
                     foregroundColor: MtColors.brand,
+                    minimumSize: const Size(0, 36),
+                    tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                     padding: const EdgeInsets.symmetric(
                         horizontal: 14, vertical: 8),
                     shape: RoundedRectangleBorder(
@@ -216,13 +283,20 @@ class _DispatchCardState extends State<_DispatchCard>
                     ),
                   ),
                   child: Text('View',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
                       style: MtTextStyles.labelMd.copyWith(
                           color: MtColors.brand,
                           fontWeight: FontWeight.w800)),
                 ),
+                const SizedBox(width: 2),
                 IconButton(
                   tooltip: 'Dismiss',
                   onPressed: widget.onDismiss,
+                  padding: EdgeInsets.zero,
+                  visualDensity: VisualDensity.compact,
+                  constraints: const BoxConstraints.tightFor(
+                      width: 36, height: 36),
                   icon: const Icon(Icons.close, color: Colors.white, size: 20),
                 ),
               ],

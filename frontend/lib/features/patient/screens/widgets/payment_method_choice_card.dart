@@ -9,6 +9,9 @@ import '../../../../core/models/patient_active_request.dart';
 import '../../../../core/theme/app_colors_ext.dart';
 import '../../../../core/theme/mt_text_styles.dart';
 import '../../../auth/auth_provider.dart';
+// The one gateway runner for a balance payment, shared with the invoice card
+// so both surfaces settle through the identical init/confirm pair.
+import '../booking_flow_pages.dart' show runBalancePayment;
 
 final _moneyFmt = NumberFormat.decimalPattern();
 String _taka(num n) => '৳${_moneyFmt.format(n.round())}';
@@ -39,11 +42,14 @@ class PaymentMethodChoiceCard extends ConsumerStatefulWidget {
 
   const PaymentMethodChoiceCard({super.key, required this.request});
 
-  /// Whether the selector is relevant for [r]: the booking is priced, still
-  /// has an outstanding balance, and is in a live tracking state.
+  /// Whether the card is relevant for [r]: the booking is priced and in a live
+  /// tracking state. A settled balance still qualifies — the card then stops
+  /// being a selector and becomes the "fully settled, nothing to collect"
+  /// receipt, which is precisely what a patient wants confirmed while a
+  /// clinician is on their way.
   static bool shouldShow(PatientActiveRequest r) {
     return (r.finalServiceFee ?? 0) > 0 &&
-        r.outstandingBalance > 0 &&
+        (r.outstandingBalance > 0 || r.balanceSettled) &&
         _selectableRawStatuses.contains(r.rawStatus);
   }
 
@@ -110,11 +116,52 @@ class _PaymentMethodChoiceCardState
     }
   }
 
+  /// Settle the balance through the gateway right now, mid-tracking. Runs the
+  /// same endpoint pair the post-visit invoice uses; the backend applies it as
+  /// a pre-payment (money only, lifecycle untouched) because the visit has not
+  /// happened yet.
+  Future<void> _payNow() async {
+    if (_busy) return;
+    HapticFeedback.selectionClick();
+    setState(() {
+      _busy = true;
+      _error = null;
+    });
+    try {
+      // Record the channel first so a patient who abandons the gateway is
+      // still on the digital path rather than leaving the clinician expecting
+      // cash they were never going to hand over.
+      if (widget.request.paymentPreference != _kDigital) {
+        await ref
+            .read(dioClientProvider)
+            .setPaymentPreference(widget.request.id, _kDigital);
+      }
+      await runBalancePayment(ref, widget.request.id);
+      if (!mounted) return;
+      setState(() => _busy = false);
+    } catch (e) {
+      if (!mounted) return;
+      final raw = e.toString().replaceFirst('Exception: ', '');
+      setState(() {
+        _busy = false;
+        _error = raw.length > 160 ? '${raw.substring(0, 160)}…' : raw;
+      });
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final c = context.appColors;
     final r = widget.request;
     final cashSelected = _choice == _kCash;
+
+    // STATE C — the balance is already in. There is no choice left to make and
+    // nothing for the clinician to collect, so the selector collapses to a
+    // receipt rather than asking a question the money has already answered.
+    if (r.isFullySettled) {
+      return _FullySettledCard(totalPaid: r.totalPaid);
+    }
+
     return Container(
       margin: const EdgeInsets.only(top: 16),
       padding: const EdgeInsets.all(14),
@@ -139,10 +186,21 @@ class _PaymentMethodChoiceCardState
             'change this any time before the visit ends.',
             style: MtTextStyles.bodySm.copyWith(color: c.body),
           ),
+          // The ledger is the point of this card, so it renders for BOTH
+          // choices — the patient should never have to select cash just to
+          // find out what the fee, the credited deposit and the balance are.
+          const SizedBox(height: 12),
+          _LedgerBox(
+            totalFee: r.finalServiceFee ?? 0,
+            deposit: r.depositAmount,
+            discount: r.adjustedDiscount ?? 0,
+            due: r.outstandingBalance,
+            payingCash: cashSelected,
+          ),
           const SizedBox(height: 12),
           _OptionTile(
             icon: Icons.credit_card_rounded,
-            title: 'Digital Payment',
+            title: 'Pay Balance Online',
             subtitle: 'bKash · Nagad · Card — pay in the app',
             selected: !cashSelected,
             onTap: _busy ? null : () => setState(() => _choice = _kDigital),
@@ -155,13 +213,25 @@ class _PaymentMethodChoiceCardState
             selected: cashSelected,
             onTap: _busy ? null : () => setState(() => _choice = _kCash),
           ),
-          if (cashSelected) ...[
+          // Online is actionable immediately: clearing it now means the
+          // clinician arrives with nothing to collect.
+          if (!cashSelected && !_dirty) ...[
             const SizedBox(height: 12),
-            _CashSummaryBox(
-              totalFee: r.finalServiceFee ?? 0,
-              deposit: r.depositAmount,
-              discount: r.adjustedDiscount ?? 0,
-              due: r.outstandingBalance,
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: _busy ? null : _payNow,
+                style: OutlinedButton.styleFrom(
+                  foregroundColor: c.brand,
+                  side: BorderSide(color: c.brand),
+                  padding: const EdgeInsets.symmetric(vertical: 13),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                ),
+                icon: const Icon(Icons.lock_outline_rounded, size: 18),
+                label: Text('Pay ${_taka(r.outstandingBalance)} Now'),
+              ),
             ),
           ],
           if (_error != null) ...[
@@ -302,17 +372,26 @@ class _OptionTile extends StatelessWidget {
   }
 }
 
-class _CashSummaryBox extends StatelessWidget {
+/// The three-line financial ledger: what the visit costs, what the
+/// deposit already covered, and what is therefore still due. Shown regardless
+/// of which settlement channel is selected — the numbers do not change with
+/// the channel, only the closing instruction does.
+class _LedgerBox extends StatelessWidget {
   final double totalFee;
   final double deposit;
   final double discount;
   final double due;
 
-  const _CashSummaryBox({
+  /// Only affects the footnote: cash names an exact amount to have ready,
+  /// online explains that paying now clears the visit.
+  final bool payingCash;
+
+  const _LedgerBox({
     required this.totalFee,
     required this.deposit,
     required this.discount,
     required this.due,
+    required this.payingCash,
   });
 
   @override
@@ -327,9 +406,9 @@ class _CashSummaryBox extends StatelessWidget {
       ),
       child: Column(
         children: [
-          _row(context, 'Total Fee', _taka(totalFee)),
+          _row(context, 'Total Service Fee', _taka(totalFee)),
           const SizedBox(height: 8),
-          _row(context, 'Deposit Paid', '- ${_taka(deposit)}',
+          _row(context, 'Less Paid Deposit', '- ${_taka(deposit)}',
               valueColor: c.positive),
           if (discount > 0) ...[
             const SizedBox(height: 8),
@@ -339,7 +418,7 @@ class _CashSummaryBox extends StatelessWidget {
           const SizedBox(height: 10),
           Container(height: 1, color: c.positive.withValues(alpha: 0.25)),
           const SizedBox(height: 10),
-          _row(context, 'Cash Due at Door', _taka(due), emphasize: true),
+          _row(context, 'Remaining Balance Due', _taka(due), emphasize: true),
           const SizedBox(height: 10),
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
@@ -348,8 +427,12 @@ class _CashSummaryBox extends StatelessWidget {
               const SizedBox(width: 8),
               Expanded(
                 child: Text(
-                  'Please pay exactly ${_taka(due)} in cash to your assigned '
-                  'provider after the visit is complete.',
+                  payingCash
+                      ? 'Please pay exactly ${_taka(due)} in cash to your '
+                          'assigned provider after the visit is complete.'
+                      : 'Pay ${_taka(due)} online now and nothing will be '
+                          'collected at your visit — or settle it once the '
+                          'visit is complete.',
                   style: MtTextStyles.bodySm.copyWith(color: c.body),
                 ),
               ),
@@ -383,6 +466,55 @@ class _CashSummaryBox extends StatelessWidget {
                 ),
         ),
       ],
+    );
+  }
+}
+
+/// STATE C on the tracking tab: fee set, deposit and balance both paid. The
+/// one thing worth saying while a clinician is en route is that they are not
+/// coming to collect anything.
+class _FullySettledCard extends StatelessWidget {
+  final double totalPaid;
+  const _FullySettledCard({required this.totalPaid});
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.appColors;
+    return Container(
+      margin: const EdgeInsets.only(top: 16),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: c.positiveBg,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: c.positive.withValues(alpha: 0.45)),
+      ),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Icon(Icons.verified_rounded, color: c.positive, size: 24),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Fully Settled · ${_taka(totalPaid)} Paid',
+                  style: MtTextStyles.labelLg.copyWith(
+                    color: c.title,
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  'Your deposit and remaining balance are both paid. No cash '
+                  'collection is needed at your visit.',
+                  style: MtTextStyles.bodySm.copyWith(color: c.body),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

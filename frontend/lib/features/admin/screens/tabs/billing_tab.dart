@@ -3,9 +3,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
 import '../../../../core/models/admin_models.dart';
+import '../../../../core/models/booking_transaction.dart';
 import '../../../../core/theme/mt_colors.dart';
 import '../../../../core/theme/mt_text_styles.dart';
 import '../../../../core/widgets/mt_error_state.dart';
+import '../../../auth/auth_provider.dart';
 import '../../admin_providers.dart';
 import '../../util/ledger_printer.dart';
 import 'admin_table_chrome.dart';
@@ -37,15 +39,21 @@ class BillingTab extends ConsumerWidget {
     final async = ref.watch(adminBillingProvider);
     final range = ref.watch(billingRangeProvider);
     return AdminListScaffold(
-      title: 'Billing',
-      subtitle: 'Completed care requests and their final settlement price',
+      title: 'Finance & Billing',
+      subtitle: 'Verify online payments, then review the settled ledger',
       onRefresh: () async {
         ref.invalidate(adminBillingProvider);
+        ref.invalidate(pendingPaymentVerificationProvider);
         await ref.read(adminBillingProvider.future);
       },
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          // PHASE 4, CHANNEL B. Sits ABOVE the ledger because every row is a
+          // patient whose prescription is locked pending this admin's action —
+          // that outranks reading historical settlements.
+          const _PaymentVerificationQueue(),
+
           // ── Date-range + print toolbar ───────────────────────────────
           Row(
             children: [
@@ -83,6 +91,218 @@ class BillingTab extends ConsumerWidget {
                         'Adjust the date range, or wait for doctors to complete visits.',
                   )
                 : _BillingView(rows: rows),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+// ─── Phase 4, Channel B: online payment verification ─────────────────────────
+
+/// The prescription-unlock queue: bookings whose remaining balance was paid
+/// ONLINE and is waiting on an admin to reconcile it against the gateway.
+///
+/// Renders nothing at all when the queue is empty — a permanent "0 pending"
+/// panel would train admins to ignore the one place that matters.
+class _PaymentVerificationQueue extends ConsumerWidget {
+  const _PaymentVerificationQueue();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final async = ref.watch(pendingPaymentVerificationProvider);
+    final rows = async.valueOrNull ?? const <BookingTransaction>[];
+    if (rows.isEmpty) return const SizedBox.shrink();
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 24),
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: const Color(0xFFFFFBEB),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: const Color(0xFFFCD34D)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Row(
+            children: [
+              const Icon(Icons.lock_clock_outlined,
+                  size: 20, color: Color(0xFFB45309)),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Online payments awaiting verification (${rows.length})',
+                      style: MtTextStyles.labelLg
+                          .copyWith(color: const Color(0xFF92400E)),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      "Each patient's prescription stays locked until you "
+                      'confirm their payment against the gateway.',
+                      style:
+                          MtTextStyles.bodySm.copyWith(color: MtColors.ink2),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          for (final row in rows) ...[
+            _VerificationRow(booking: row),
+            if (row != rows.last) const SizedBox(height: 10),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+/// One pending booking: what was paid, the transaction reference to reconcile
+/// against, and the single action that verifies it.
+class _VerificationRow extends ConsumerStatefulWidget {
+  final BookingTransaction booking;
+  const _VerificationRow({required this.booking});
+
+  @override
+  ConsumerState<_VerificationRow> createState() => _VerificationRowState();
+}
+
+class _VerificationRowState extends ConsumerState<_VerificationRow> {
+  bool _busy = false;
+
+  Future<void> _verify() async {
+    final b = widget.booking;
+    final messenger = ScaffoldMessenger.of(context);
+    // Verifying releases clinical content and cannot be undone in-app, so the
+    // admin confirms against the reference rather than tapping straight
+    // through from a list.
+    final sure = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+        title: Text('Verify payment & unlock?', style: MtTextStyles.h3),
+        content: Text(
+          'Confirm that the remaining balance for booking ${b.bookingId} '
+          'was received'
+          '${b.remainingPaymentReference != null ? ' (ref ${b.remainingPaymentReference})' : ''}'
+          ". This releases the patient's prescription immediately and cannot "
+          'be undone here.',
+          style: MtTextStyles.bodyMd.copyWith(color: MtColors.ink2),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            style: FilledButton.styleFrom(backgroundColor: MtColors.completed),
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('Verify & Unlock'),
+          ),
+        ],
+      ),
+    );
+    if (sure != true || !mounted) return;
+
+    setState(() => _busy = true);
+    try {
+      await ref.read(dioClientProvider).adminVerifyBookingPayment(b.bookingId);
+      ref.invalidate(pendingPaymentVerificationProvider);
+      ref.invalidate(adminBillingProvider);
+      if (!mounted) return;
+      messenger.showSnackBar(
+        SnackBar(
+          backgroundColor: MtColors.completed,
+          content: Text(
+            'Payment verified — prescription unlocked for ${b.bookingId}.',
+          ),
+        ),
+      );
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _busy = false);
+      messenger.showSnackBar(
+        SnackBar(
+          backgroundColor: MtColors.rejected,
+          content: Text('Could not verify: $e'),
+        ),
+      );
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final b = widget.booking;
+    return Container(
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: MtColors.line),
+      ),
+      child: Row(
+        children: [
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  b.serviceName.isEmpty ? 'Care service' : b.serviceName,
+                  style: MtTextStyles.labelMd,
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  'Booking ${b.bookingId} · total ${_money(b.totalPaid)}',
+                  style: MtTextStyles.bodySm.copyWith(color: MtColors.ink3),
+                ),
+                // The reference is the whole point of this row: it is what the
+                // admin looks up in the gateway dashboard before verifying.
+                if (b.remainingPaymentReference != null) ...[
+                  const SizedBox(height: 4),
+                  Text(
+                    'Txn ref: ${b.remainingPaymentReference}',
+                    style: MtTextStyles.labelSm.copyWith(
+                      color: const Color(0xFF92400E),
+                    ),
+                  ),
+                ],
+              ],
+            ),
+          ),
+          const SizedBox(width: 12),
+          SizedBox(
+            width: 190,
+            child: ElevatedButton.icon(
+              onPressed: _busy ? null : _verify,
+              style: ElevatedButton.styleFrom(
+                backgroundColor: MtColors.completed,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(vertical: 12),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+              icon: _busy
+                  ? const SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        valueColor:
+                            AlwaysStoppedAnimation<Color>(Colors.white),
+                      ),
+                    )
+                  : const Icon(Icons.lock_open_rounded, size: 16),
+              label: Text(
+                _busy ? 'Verifying…' : 'Verify & Unlock',
+                style: MtTextStyles.labelMd.copyWith(color: Colors.white),
+              ),
+            ),
           ),
         ],
       ),

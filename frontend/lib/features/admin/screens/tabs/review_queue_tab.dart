@@ -7,14 +7,19 @@ import '../../../../core/theme/mt_text_styles.dart';
 import '../../../../core/widgets/mt_empty_state.dart';
 import '../../../../core/widgets/mt_search_field.dart';
 import '../../../../core/widgets/mt_error_state.dart';
+import '../../admin_nav.dart';
 import '../../admin_providers.dart';
 import '../../widgets/more_filters_sheet.dart';
 import '../../widgets/triage_slide_over.dart';
 import 'admin_table_chrome.dart';
 
+/// The full care-request table — the "All bookings" tab of the Bookings hub.
+///
+/// Carries the status chips and the bulk approve/reject toolbar that used to
+/// be their own sidebar destination. Hand-offs to the dispatch workspace now
+/// switch the hub's tab instead of navigating, so the admin keeps their place.
 class ReviewQueueTab extends ConsumerStatefulWidget {
-  final ValueChanged<int>? onNavigateTab;
-  const ReviewQueueTab({super.key, this.onNavigateTab});
+  const ReviewQueueTab({super.key});
 
   @override
   ConsumerState<ReviewQueueTab> createState() => _ReviewQueueTabState();
@@ -22,6 +27,10 @@ class ReviewQueueTab extends ConsumerStatefulWidget {
 
 class _ReviewQueueTabState extends ConsumerState<ReviewQueueTab> {
   final _searchController = TextEditingController();
+
+  /// Move to the dispatch workspace within the Bookings hub.
+  void _goToAssignment() =>
+      ref.read(bookingsTabProvider.notifier).state = BookingsTab.assignment;
 
   @override
   void initState() {
@@ -46,10 +55,19 @@ class _ReviewQueueTabState extends ConsumerState<ReviewQueueTab> {
         ref.read(requestFilterProvider).copyWith(searchQuery: val);
   }
 
-  void _setFilter(String? statusFilter, {bool urgencyOnly = false}) {
-    ref.read(requestFilterProvider.notifier).state = ref
-        .read(requestFilterProvider)
-        .copyWith(statusFilter: () => statusFilter, urgencyOnly: urgencyOnly);
+  /// Chips are mutually exclusive, so every one of them clears the other two
+  /// status dimensions rather than layering on top of whatever was set.
+  void _setFilter(
+    String? statusFilter, {
+    bool urgencyOnly = false,
+    Set<String> statusAnyOf = const {},
+  }) {
+    ref.read(requestFilterProvider.notifier).state =
+        ref.read(requestFilterProvider).copyWith(
+              statusFilter: () => statusFilter,
+              urgencyOnly: urgencyOnly,
+              statusAnyOf: statusAnyOf,
+            );
   }
 
   @override
@@ -87,46 +105,74 @@ class _ReviewQueueTabState extends ConsumerState<ReviewQueueTab> {
                   ),
                   const SizedBox(width: 16),
 
-                  // Chips
-                  _FilterChip(
-                    label: 'All',
-                    count: counts['all'] ?? 0,
-                    selected:
-                        filter.statusFilter == null && !filter.urgencyOnly,
-                    onTap: () => _setFilter(null),
+                  // Chips — the five of them plus the search field and the
+                  // "More filters" button are wider than a laptop viewport,
+                  // so the chip strip takes the slack and scrolls sideways
+                  // instead of overflowing the bar.
+                  Expanded(
+                    child: SingleChildScrollView(
+                      scrollDirection: Axis.horizontal,
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          _FilterChip(
+                            label: 'All',
+                            count: counts['all'] ?? 0,
+                            selected: filter.statusFilter == null &&
+                                !filter.urgencyOnly &&
+                                filter.statusAnyOf.isEmpty,
+                            onTap: () => _setFilter(null),
+                          ),
+                          const SizedBox(width: 8),
+                          _FilterChip(
+                            label: 'Pending',
+                            count: counts['pending'] ?? 0,
+                            selected: filter.statusFilter == 'pending' &&
+                                !filter.urgencyOnly,
+                            onTap: () => _setFilter('pending'),
+                          ),
+                          const SizedBox(width: 8),
+                          _FilterChip(
+                            label: 'Urgent',
+                            count: counts['urgent'] ?? 0,
+                            selected: filter.urgencyOnly,
+                            onTap: () => _setFilter(null, urgencyOnly: true),
+                          ),
+                          const SizedBox(width: 8),
+                          _FilterChip(
+                            // 'approved' now means "needs (re-)assignment" — a
+                            // doctor declined or a legacy payment landed.
+                            label: 'Awaiting assignment',
+                            count: counts['approved'] ?? 0,
+                            selected: filter.statusFilter == 'approved',
+                            onTap: () => _setFilter('approved'),
+                          ),
+                          const SizedBox(width: 8),
+                          // Carried over from the retired Booking-pipeline
+                          // board, whose "payment" stage was the only view
+                          // of these two states. Spans both because no
+                          // single status covers the stage.
+                          _FilterChip(
+                            label: 'Awaiting payment',
+                            count: counts['awaitingPayment'] ?? 0,
+                            selected: filter.statusAnyOf.isNotEmpty,
+                            onTap: () => _setFilter(
+                              null,
+                              statusAnyOf: kAwaitingPaymentStatuses,
+                            ),
+                          ),
+                          const SizedBox(width: 8),
+                          _FilterChip(
+                            label: 'Rejected',
+                            count: counts['rejected'] ?? 0,
+                            selected: filter.statusFilter == 'rejected',
+                            onTap: () => _setFilter('rejected'),
+                          ),
+                        ],
+                      ),
+                    ),
                   ),
-                  const SizedBox(width: 8),
-                  _FilterChip(
-                    label: 'Pending',
-                    count: counts['pending'] ?? 0,
-                    selected: filter.statusFilter == 'pending' &&
-                        !filter.urgencyOnly,
-                    onTap: () => _setFilter('pending'),
-                  ),
-                  const SizedBox(width: 8),
-                  _FilterChip(
-                    label: 'Urgent',
-                    count: counts['urgent'] ?? 0,
-                    selected: filter.urgencyOnly,
-                    onTap: () => _setFilter(null, urgencyOnly: true),
-                  ),
-                  const SizedBox(width: 8),
-                  _FilterChip(
-                    // 'approved' now means "needs (re-)assignment" — a
-                    // doctor declined or a legacy payment landed.
-                    label: 'Awaiting assignment',
-                    count: counts['approved'] ?? 0,
-                    selected: filter.statusFilter == 'approved',
-                    onTap: () => _setFilter('approved'),
-                  ),
-                  const SizedBox(width: 8),
-                  _FilterChip(
-                    label: 'Rejected',
-                    count: counts['rejected'] ?? 0,
-                    selected: filter.statusFilter == 'rejected',
-                    onTap: () => _setFilter('rejected'),
-                  ),
-                  const Spacer(),
+                  const SizedBox(width: 16),
                   OutlinedButton.icon(
                     onPressed: () => showMoreFiltersSheet(context),
                     icon: const Icon(Icons.filter_list, size: 18),
@@ -390,9 +436,7 @@ class _ReviewQueueTabState extends ConsumerState<ReviewQueueTab> {
                     // standalone "approve" status flip (the backend
                     // rejects it). Route the admin to Assign Team.
                     ElevatedButton(
-                      onPressed: () {
-                        widget.onNavigateTab?.call(2);
-                      },
+                      onPressed: _goToAssignment,
                       style: ElevatedButton.styleFrom(
                         backgroundColor: MtColors.brand,
                         foregroundColor: Colors.white,
@@ -417,7 +461,7 @@ class _ReviewQueueTabState extends ConsumerState<ReviewQueueTab> {
       onAssignTeam: () {
         Navigator.pop(context); // close slide-over
         ref.read(selectedRequestProvider.notifier).state = request;
-        widget.onNavigateTab?.call(2); // Go to assign team tab
+        _goToAssignment();
       },
     );
   }

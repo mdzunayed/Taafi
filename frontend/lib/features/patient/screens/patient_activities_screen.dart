@@ -7,14 +7,18 @@ import '../../notifications/widgets/notification_bell.dart';
 import '../navigation/patient_nav_provider.dart';
 import '../history/patient_history_tab.dart';
 import '../../prescriptions/medications_tab_view.dart';
-import 'tracking_tab.dart';
-import 'under_review_tab.dart';
+import 'active_care_tab.dart';
 
-/// Unified activity hub for the patient. Replaces the three separate
-/// top-level chips the old shell exposed ("Under Review", "Tracking",
-/// "Rating") with a single bottom-nav destination that owns its own
-/// small `TabBar` switcher. State is driven by
-/// [patientActivitiesTabProvider] so deep-link helpers in
+/// Unified activity hub for the patient: **Active Care**, **History**,
+/// **Medications**.
+///
+/// Was four tabs. "Under Review" and "Service Status" were the same booking
+/// rendered twice — two timelines derived from two different sources that
+/// disagreed on which step the patient was on, with the deposit CTA on one and
+/// the assigned provider's phone number on the other. They are now a single
+/// [ActiveCareTab].
+///
+/// State is driven by [patientActivitiesTabProvider] so deep-link helpers in
 /// `patient_nav_provider.dart` can address any sub-tab atomically.
 class PatientActivitiesScreen extends ConsumerStatefulWidget {
   const PatientActivitiesScreen({super.key});
@@ -88,8 +92,7 @@ class _PatientActivitiesScreenState
                     controller: _tabController,
                     physics: const ClampingScrollPhysics(),
                     children: const [
-                      UnderReviewTab(),
-                      TrackingTab(),
+                      ActiveCareTab(),
                       PatientHistoryTab(),
                       MedicationsTabView(),
                     ],
@@ -124,22 +127,9 @@ class _ActivitiesHeader extends ConsumerWidget {
             tooltip: 'Back to home',
           ),
           Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Your activities',
-                  style: MtTextStyles.h1.copyWith(color: c.title),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  'আপনার কার্যক্রম',
-                  style: MtTextStyles.bodySm.copyWith(
-                    color: c.body,
-                    fontFamily: 'Kalpurush',
-                  ),
-                ),
-              ],
+            child: Text(
+              'Your activities',
+              style: MtTextStyles.h1.copyWith(color: c.title),
             ),
           ),
           const NotificationBell(),
@@ -153,9 +143,11 @@ class _ActivitiesTabBar extends StatelessWidget {
   final TabController controller;
   const _ActivitiesTabBar({required this.controller});
 
-  // Below this container width the bar switches to horizontal scroll so
-  // text on very small handsets is never clipped or compressed.
-  static const double _scrollThreshold = 360.0;
+  // Below this container width the bar switches to horizontal scroll so text
+  // is never clipped or compressed. Dropped from 520 when the four tabs became
+  // three: "Active Care" is the longest label and three even divisions on a
+  // ~390 pt handset give each ~127 pt, which it fits comfortably.
+  static const double _scrollThreshold = 340.0;
 
   @override
   Widget build(BuildContext context) {
@@ -191,13 +183,15 @@ class _ActivitiesTabBar extends StatelessWidget {
               dividerColor: Colors.transparent,
               labelColor: c.onAccent,
               unselectedLabelColor: c.body,
+              // 14pt now that each pill is a single English line — the 12pt
+              // base was sized for the two-line bilingual label.
               labelStyle: MtTextStyles.labelMd
-                  .copyWith(fontWeight: FontWeight.w700),
+                  .copyWith(fontSize: 14, fontWeight: FontWeight.w700),
               unselectedLabelStyle: MtTextStyles.labelMd
-                  .copyWith(fontWeight: FontWeight.w500),
+                  .copyWith(fontSize: 14, fontWeight: FontWeight.w500),
               // Scrollable: give each tab comfortable side padding so
               // labels breathe. Fill: zero padding lets Flutter distribute
-              // the full container width evenly across all four tabs.
+              // the full container width evenly across all three tabs.
               labelPadding: isScrollable
                   ? const EdgeInsets.symmetric(horizontal: 16)
                   : EdgeInsets.zero,
@@ -205,11 +199,13 @@ class _ActivitiesTabBar extends StatelessWidget {
               isScrollable: isScrollable,
               tabAlignment:
                   isScrollable ? TabAlignment.start : TabAlignment.fill,
+              // Plain [Tab]s: a single-line label needs no custom child, and
+              // `text:` inherits the resolved label/unselected colour and
+              // weight that TabBar pushes down.
               tabs: const [
-                Tab(height: 38, text: 'Under Review'),
-                Tab(height: 38, text: 'Tracking'),
-                Tab(height: 38, text: 'History'),
-                Tab(height: 38, text: 'Medications'),
+                Tab(text: 'Active Care'),
+                Tab(text: 'History'),
+                Tab(text: 'Medications'),
               ],
             ),
           );

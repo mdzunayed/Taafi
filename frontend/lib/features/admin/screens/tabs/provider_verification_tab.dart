@@ -10,22 +10,37 @@ import '../../../auth/auth_provider.dart';
 import '../../admin_providers.dart';
 import 'admin_table_chrome.dart';
 
-/// Credential-review queue for a single provider role. Unlike the flat
-/// Providers directory, this surfaces the actual registration credentials
-/// (BMDC / BNMC number, degrees, institute affiliation, experience) so an
-/// admin can review them before flipping the verification toggle. One
-/// instance is mounted per role (doctor / nurse).
+/// Credential-review queue. Unlike the flat Providers directory, this
+/// surfaces the actual registration credentials (BMDC / BNMC number,
+/// degrees, institute affiliation, experience) so an admin can review them
+/// before flipping the verification toggle.
+///
+/// [role] scopes the queue to one provider role; leaving it null merges
+/// doctors and nurses into a single list, which is how the Providers hub
+/// mounts it. The per-row credential labels were always derived per card,
+/// so a mixed list needs no special handling beyond reading the role off
+/// each provider instead of off the widget.
 class ProviderVerificationTab extends ConsumerWidget {
-  /// `'doctor'` or `'nurse'` — the backend Provider role to review.
-  final String role;
-  const ProviderVerificationTab({super.key, required this.role});
+  /// `'doctor'`, `'nurse'`, or null for both.
+  final String? role;
 
-  bool get _isNurse => role == 'nurse';
+  /// Hide the screen's own heading — the Providers hub already renders a
+  /// title above the pill strip, and two stacked headers read as a bug.
+  final bool embedded;
 
-  String get _licenseLabel => _isNurse ? 'BNMC registration' : 'BMDC registration';
+  const ProviderVerificationTab({
+    super.key,
+    this.role,
+    this.embedded = false,
+  });
 
-  String _licenseOf(DoctorProfile p) =>
-      _isNurse ? p.nursingLicense : p.bmdcLicense;
+  static bool _isNurseRole(DoctorProfile p) => p.role == 'nurse';
+
+  static String _licenseLabelOf(DoctorProfile p) =>
+      _isNurseRole(p) ? 'BNMC registration' : 'BMDC registration';
+
+  static String _licenseOf(DoctorProfile p) =>
+      _isNurseRole(p) ? p.nursingLicense : p.bmdcLicense;
 
   Future<void> _toggle(
     BuildContext context,
@@ -50,68 +65,91 @@ class ProviderVerificationTab extends ConsumerWidget {
     }
   }
 
+  /// Noun for the current scope, used in the title and empty state.
+  String get _scopeNoun => switch (role) {
+        'nurse' => 'nurses',
+        'doctor' => 'doctors',
+        _ => 'providers',
+      };
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final async = ref.watch(adminProvidersListProvider);
-    final title =
-        _isNurse ? 'Nurse Verification Queue' : 'Doctor Verification Queue';
+
+    final body = async.when(
+      loading: () => const Padding(
+        padding: EdgeInsets.symmetric(vertical: 64),
+        child: Center(child: CircularProgressIndicator()),
+      ),
+      error: (e, _) => MtErrorState(
+        message: e.toString(),
+        onRetry: () => ref.invalidate(adminProvidersListProvider),
+      ),
+      data: (providers) {
+        // Role-scoped (or both roles when null), pending-first so the
+        // actual work queue floats to the top.
+        final scoped = providers
+            .where((p) => role == null
+                ? (p.role == 'doctor' || p.role == 'nurse')
+                : p.role == role)
+            .toList()
+          ..sort((a, b) {
+            if (a.isVerified == b.isVerified) {
+              return a.fullName.compareTo(b.fullName);
+            }
+            return a.isVerified ? 1 : -1;
+          });
+        if (scoped.isEmpty) {
+          return AdminEmptyState(
+            icon: role == 'nurse'
+                ? Icons.vaccines_outlined
+                : Icons.medical_information_outlined,
+            title: 'No $_scopeNoun to review',
+            subtitle:
+                'Newly onboarded $_scopeNoun appear here for credential review.',
+          );
+        }
+        final pending = scoped.where((p) => !p.isVerified).length;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            _QueueSummary(total: scoped.length, pending: pending),
+            const SizedBox(height: 16),
+            for (final p in scoped) ...[
+              _VerificationCard(
+                provider: p,
+                licenseLabel: _licenseLabelOf(p),
+                license: _licenseOf(p),
+                isNurse: _isNurseRole(p),
+                onToggle: () => _toggle(context, ref, p),
+              ),
+              const SizedBox(height: 12),
+            ],
+          ],
+        );
+      },
+    );
+
+    if (embedded) {
+      return SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(32, 24, 32, 32),
+        child: body,
+      );
+    }
+
     return AdminListScaffold(
-      title: title,
-      subtitle: _isNurse
-          ? 'Review BNMC registration, qualifications & institute before approving'
-          : 'Review BMDC registration, degrees & affiliation before approving',
+      title: switch (role) {
+        'nurse' => 'Nurse Verification Queue',
+        'doctor' => 'Doctor Verification Queue',
+        _ => 'Provider Verification Queue',
+      },
+      subtitle:
+          'Review registration, qualifications & institute before approving',
       onRefresh: () async {
         ref.invalidate(adminProvidersListProvider);
         await ref.read(adminProvidersListProvider.future);
       },
-      child: async.when(
-        loading: () => const Padding(
-          padding: EdgeInsets.symmetric(vertical: 64),
-          child: Center(child: CircularProgressIndicator()),
-        ),
-        error: (e, _) => MtErrorState(
-          message: e.toString(),
-          onRetry: () => ref.invalidate(adminProvidersListProvider),
-        ),
-        data: (providers) {
-          // Role-scoped, pending-first (the work queue floats to the top).
-          final scoped = providers.where((p) => p.role == role).toList()
-            ..sort((a, b) {
-              if (a.isVerified == b.isVerified) {
-                return a.fullName.compareTo(b.fullName);
-              }
-              return a.isVerified ? 1 : -1;
-            });
-          if (scoped.isEmpty) {
-            return AdminEmptyState(
-              icon: _isNurse
-                  ? Icons.vaccines_outlined
-                  : Icons.medical_information_outlined,
-              title: 'No ${_isNurse ? 'nurses' : 'doctors'} to review',
-              subtitle:
-                  'Newly onboarded ${_isNurse ? 'nurses' : 'doctors'} appear here for credential review.',
-            );
-          }
-          final pending = scoped.where((p) => !p.isVerified).length;
-          return Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              _QueueSummary(total: scoped.length, pending: pending),
-              const SizedBox(height: 16),
-              for (final p in scoped) ...[
-                _VerificationCard(
-                  provider: p,
-                  licenseLabel: _licenseLabel,
-                  license: _licenseOf(p),
-                  isNurse: _isNurse,
-                  onToggle: () => _toggle(context, ref, p),
-                ),
-                const SizedBox(height: 12),
-              ],
-            ],
-          );
-        },
-      ),
+      child: body,
     );
   }
 }

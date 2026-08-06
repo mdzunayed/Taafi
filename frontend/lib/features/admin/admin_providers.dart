@@ -7,6 +7,7 @@ import '../../core/api/dio_client.dart';
 import '../../core/models/admin_chart_data.dart';
 import '../../core/models/admin_models.dart';
 import '../../core/models/admin_patient_detail.dart';
+import '../../core/models/booking_transaction.dart';
 import '../../core/models/doctor_profile.dart';
 import '../../core/models/prescription.dart';
 import '../../core/models/provider_cash_ledger.dart';
@@ -425,6 +426,15 @@ final filteredRequestsProvider = Provider<List<AdminCareRequest>>((ref) {
             filtered.where((r) => r.status == filter.statusFilter).toList();
       }
 
+      // Multi-status filter — a lifecycle stage that spans several backend
+      // states (e.g. "awaiting payment" covers the legacy and the
+      // pay-after-service variants).
+      if (filter.statusAnyOf.isNotEmpty) {
+        filtered = filtered
+            .where((r) => filter.statusAnyOf.contains(r.status))
+            .toList();
+      }
+
       // Service type filter
       if (filter.serviceTypeFilter != null) {
         filtered = filtered
@@ -468,6 +478,40 @@ final filteredRequestsProvider = Provider<List<AdminCareRequest>>((ref) {
   );
 });
 
+// ─── Lifecycle stage queues ──────────────────────────────────────────────────
+
+/// Bookings priced and paid but still without a dispatch team. `approved`
+/// means "needs (re-)assignment" — a doctor declined, or a legacy payment
+/// landed. Feeds the Bookings hub's "Needs assignment" tab.
+final needsAssignmentQueueProvider = Provider<List<AdminCareRequest>>((ref) {
+  final async = ref.watch(adminRequestsProvider);
+  return async.maybeWhen(
+    data: (list) =>
+        list.where((r) => r.status == 'approved').toList(growable: false),
+    orElse: () => const <AdminCareRequest>[],
+  );
+});
+
+/// The two backend states that both mean "priced, waiting on the patient's
+/// balance payment": the legacy pay-before-dispatch flow and the newer
+/// pay-after-service one. Kept as a set because no single `status` string
+/// covers the stage.
+const kAwaitingPaymentStatuses = <String>{
+  'amount_assigned_awaiting_final_payment',
+  'service_completed_awaiting_final_payment',
+};
+
+/// Bookings awaiting the patient's balance payment, across both flows.
+final awaitingPaymentAllProvider = Provider<List<AdminCareRequest>>((ref) {
+  final async = ref.watch(adminRequestsProvider);
+  return async.maybeWhen(
+    data: (list) => list
+        .where((r) => kAwaitingPaymentStatuses.contains(r.status))
+        .toList(growable: false),
+    orElse: () => const <AdminCareRequest>[],
+  );
+});
+
 // ─── Filter Counts ───────────────────────────────────────────────────────────
 
 final requestCountsProvider = Provider<Map<String, int>>((ref) {
@@ -481,6 +525,9 @@ final requestCountsProvider = Provider<Map<String, int>>((ref) {
         'urgent': requests.where((r) => r.isUrgent).length,
         'approved': requests.where((r) => r.status == 'approved').length,
         'rejected': requests.where((r) => r.status == 'rejected').length,
+        'awaitingPayment': requests
+            .where((r) => kAwaitingPaymentStatuses.contains(r.status))
+            .length,
       };
     },
     orElse: () => {
@@ -489,6 +536,7 @@ final requestCountsProvider = Provider<Map<String, int>>((ref) {
       'urgent': 0,
       'approved': 0,
       'rejected': 0,
+      'awaitingPayment': 0,
     },
   );
 });
@@ -727,6 +775,17 @@ final adminBillingProvider =
         startDate: range?.start,
         endDate: range?.end,
       );
+});
+
+/// PHASE 4, CHANNEL B — `GET /admin/bookings/pending-verification`.
+///
+/// Bookings whose remaining balance arrived ONLINE and is waiting on an admin
+/// to reconcile it against the gateway. Every row here is a patient whose
+/// prescription is locked until someone acts, so the Billing tab surfaces it
+/// above the ledger rather than behind a filter.
+final pendingPaymentVerificationProvider =
+    FutureProvider.autoDispose<List<BookingTransaction>>((ref) async {
+  return ref.read(dioClientProvider).adminGetBookingsPendingVerification();
 });
 
 // ---------------------------------------------------------------------------

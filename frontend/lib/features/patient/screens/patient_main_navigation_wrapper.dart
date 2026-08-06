@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../navigation/presentation/widgets/custom_floating_navbar.dart';
 import '../navigation/patient_nav_provider.dart';
+import '../new_request/new_request_notifier.dart';
 import '../widgets/app_open_ad_interstitial.dart';
 import 'new_request_tab.dart';
 import 'patient_account_screen.dart';
@@ -50,6 +51,26 @@ class PatientMainNavigationWrapper extends ConsumerWidget {
     );
   }
 
+  /// Bottom-tray taps. Every destination just switches the [IndexedStack]
+  /// index, except "+".
+  ///
+  /// Tapping "+" is an explicit request to start a *new* booking, so the form
+  /// is cleared before the switch. Doing it here rather than inside
+  /// [PatientNavController.changeTab] is what keeps the two ways into this
+  /// destination distinct: a service card prefills its service and calls
+  /// `goToNewRequest()`, which never routes through this handler and so keeps
+  /// its pre-selection.
+  ///
+  /// The reset runs before `changeTab`, not after, because `changeTab` no-ops
+  /// when the index is unchanged — and a patient already parked on a prefilled
+  /// form who taps "+" is precisely the case that most needs the clean slate.
+  void _onDestinationTap(WidgetRef ref, int index) {
+    if (index == PatientNavIndex.newRequest) {
+      ref.read(newRequestProvider.notifier).resetBookingForm();
+    }
+    ref.read(patientNavProvider.notifier).changeTab(index);
+  }
+
   Widget _buildShell(
     BuildContext context,
     WidgetRef ref,
@@ -88,8 +109,7 @@ class PatientMainNavigationWrapper extends ConsumerWidget {
         color: canvas,
         child: CustomFloatingNavBar(
           currentIndex: currentIndex,
-          onTap: (index) =>
-              ref.read(patientNavProvider.notifier).changeTab(index),
+          onTap: (index) => _onDestinationTap(ref, index),
           items: const [
             FloatingNavItem(
               icon: Icons.home_outlined,

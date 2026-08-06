@@ -7,14 +7,19 @@ import '../../../../core/theme/mt_colors.dart';
 import '../../../../core/theme/mt_text_styles.dart';
 import '../../../../core/widgets/mt_error_state.dart';
 import '../../../../core/widgets/shimmer_loading_placeholder.dart';
+import '../../admin_nav.dart';
 import '../../admin_providers.dart';
 import '../../widgets/triage_slide_over.dart';
 import 'admin_table_chrome.dart';
+import 'live_monitor_tab.dart';
 
 class OverviewTab extends ConsumerWidget {
-  final ValueChanged<int>? onNavigateTab;
+  /// Hands a booking to the Bookings hub, landing on [tab]. The Overview is
+  /// the only screen that still cross-navigates between sidebar sections —
+  /// everything else the consolidation folded into a single hub.
+  final void Function(BookingsTab tab)? onOpenBookings;
 
-  const OverviewTab({super.key, this.onNavigateTab});
+  const OverviewTab({super.key, this.onOpenBookings});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -200,8 +205,32 @@ class OverviewTab extends ConsumerWidget {
           ),
           const SizedBox(height: 32),
 
+          // ── Live dispatch map ────────────────────────────────────────
+          // Folded in from the retired Live-monitor destination. It owns
+          // its own 10s polling timer, so it stays a self-contained panel
+          // rather than being flattened into this tab's build. Bounded
+          // height because the panel is an unconstrained Row internally.
+          Text('Live dispatch', style: MtTextStyles.labelLg),
+          const SizedBox(height: 4),
+          Text(
+            'Visits currently on the way, arrived, or in service',
+            style: MtTextStyles.bodySm.copyWith(color: MtColors.ink3),
+          ),
+          const SizedBox(height: 12),
+          Container(
+            height: 520,
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(12),
+              border: Border.all(color: MtColors.line),
+            ),
+            clipBehavior: Clip.antiAlias,
+            child: const LiveMonitorTab(),
+          ),
+          const SizedBox(height: 32),
+
           // ── Pending Review Table ─────────────────────────────────────
-          _PendingReviewSection(onNavigateTab: onNavigateTab),
+          _PendingReviewSection(onOpenBookings: onOpenBookings),
         ],
       ),
     );
@@ -553,9 +582,10 @@ class _ActivityEventTile extends StatelessWidget {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 class _PendingReviewSection extends ConsumerWidget {
-  final ValueChanged<int>? onNavigateTab;
+  /// Jump to the Bookings hub. [tab] selects which lane to land on.
+  final void Function(BookingsTab tab)? onOpenBookings;
 
-  const _PendingReviewSection({this.onNavigateTab});
+  const _PendingReviewSection({this.onOpenBookings});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -587,7 +617,7 @@ class _PendingReviewSection extends ConsumerWidget {
                 ],
               ),
               OutlinedButton(
-                onPressed: () => onNavigateTab?.call(1),
+                onPressed: () => onOpenBookings?.call(BookingsTab.all),
                 style: OutlinedButton.styleFrom(
                   foregroundColor: MtColors.ink,
                   side: const BorderSide(color: MtColors.line),
@@ -663,7 +693,7 @@ class _PendingReviewSection extends ConsumerWidget {
           else
             ...pending.map((r) => _PendingRow(
                   request: r,
-                  onNavigateTab: onNavigateTab,
+                  onOpenBookings: onOpenBookings,
                 )),
         ],
       ),
@@ -673,9 +703,9 @@ class _PendingReviewSection extends ConsumerWidget {
 
 class _PendingRow extends ConsumerWidget {
   final AdminCareRequest request;
-  final ValueChanged<int>? onNavigateTab;
+  final void Function(BookingsTab tab)? onOpenBookings;
 
-  const _PendingRow({required this.request, this.onNavigateTab});
+  const _PendingRow({required this.request, this.onOpenBookings});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -689,7 +719,7 @@ class _PendingRow extends ConsumerWidget {
         onAssignTeam: () {
           Navigator.pop(context); // close slide-over
           ref.read(selectedRequestProvider.notifier).state = request;
-          onNavigateTab?.call(2);
+          onOpenBookings?.call(BookingsTab.assignment);
         },
       ),
       child: Column(

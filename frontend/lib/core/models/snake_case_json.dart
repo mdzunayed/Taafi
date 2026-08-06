@@ -20,12 +20,15 @@ import 'admin_models.dart';
 import 'assigned_doctor.dart';
 import 'assigned_nurse.dart';
 import 'assigned_provider.dart';
+import 'booking_attachment.dart';
 import 'booking_milestone.dart';
+import 'deposit_status.dart';
 import 'doctor_dashboard.dart';
 import 'doctor_review.dart';
 import 'patient_active_request.dart';
 import 'patient_home_feed.dart';
 import 'patient_request_status.dart';
+import 'platform_pricing.dart' show resolveDepositRequired;
 import 'provider_type.dart';
 import 'recent_provider.dart';
 import 'service.dart';
@@ -215,6 +218,24 @@ AdminCareRequest adminCareRequestFromMongo(Map<String, dynamic> j) {
     notes: _str(j['condition_note']), // patient's condition note
     phone: _str(j['patient_phone']),
     adminNote: _str(j['admin_note']),
+    paymentPreference: _str(j['payment_preference']),
+    // What this booking ACTUALLY paid. 0 until the gateway settles — the
+    // admin fee validation must credit an unpaid booking nothing rather than
+    // assuming the platform default.
+    depositAmount: _money(j['deposit_amount']) ?? 0,
+    // What the admin COMMITTED on the review call, null before it. Distinct
+    // from the amount paid: this is what the console re-renders when the
+    // admin reopens a booking they have already quoted.
+    requiredDeposit:
+        _money(j['required_deposit']) ?? _money(j['deposit_required_amount']),
+    remainingPaymentStatus: _str(j['remaining_payment_status']) ?? 'PENDING',
+    remainingPaymentReference: _str(j['remaining_payment_reference']),
+    prescriptionUnlocked: j['prescription_unlocked'] == true,
+    // Previous medical documents the patient attached, already presigned by
+    // the admin router (`utils/bookingAttachments.js`). Admin-gated responses
+    // only — the raw `documents` array is stripped there, so an empty list
+    // here means "nothing attached", never "the URL was withheld".
+    attachments: BookingAttachment.listFrom(j['attachments']),
   );
 }
 
@@ -230,6 +251,7 @@ BookingMilestone _milestoneFromStatus(String? wire) {
     case 'submitted':
     case 'pending':
     case 'pending_review':
+    case 'deposit_required':
     case 'deposit_paid_admin_reviewing':
       return BookingMilestone.requested;
     case 'approved':
@@ -339,10 +361,47 @@ PatientActiveRequest patientActiveFromMongo(Map<String, dynamic> j) {
     durationHours: _int(j['duration_hours']),
     offer: _money(j['offered_budget'])?.round(),
     rawStatus: _str(j['status']) ?? '',
+    // Server-derived four-state. The fallback covers a backend that predates
+    // `deposit_status`: a settled deposit always carries a paid-at stamp or a
+    // non-zero amount; failing that, a deposit is only OWED if one was ever
+    // set, and otherwise the booking is still awaiting its review call.
+    depositStatus: DepositStatusX.fromWire(
+      _str(j['deposit_status']),
+      fallback: (_date(j['deposit_paid_at']) != null ||
+              (_money(j['deposit_amount']) ?? 0) > 0 ||
+              (j['deposit_paid'] == true))
+          ? DepositStatus.confirmed
+          : ((_money(j['required_deposit']) ??
+                      _money(j['deposit_required_amount'])) ??
+                  0) >
+                  0
+              ? DepositStatus.pending
+              : DepositStatus.notRequired,
+    ),
     depositAmount: _money(j['deposit_amount']) ?? 0,
-    finalServiceFee: _money(j['final_price']),
+    // Server-resolved (paid → quoted → configured). The fallbacks inside
+    // `resolveDepositRequired` only matter against a backend predating it.
+    // Null when no deposit has been set for this booking — Phase 1 owes ৳0,
+    // and substituting a default here would price a free request.
+    depositRequiredAmount: resolveDepositRequired(
+      _money(j['required_deposit']) ?? _money(j['deposit_required_amount']),
+      _money(j['deposit_amount']),
+    ),
+    finalServiceFee:
+        _money(j['total_service_fee']) ?? _money(j['final_price']),
     adjustedDiscount: _money(j['adjusted_discount']),
     paymentPreference: _str(j['payment_preference']),
+    // Has the BALANCE landed (as opposed to the deposit)? Prefer the
+    // server's derived `payment_status`, which already folds together the two
+    // ways it can arrive — the gateway and the provider's cash collection.
+    // The raw stamps are the fallback for a backend predating the projection.
+    balanceSettled: _str(j['payment_status'])?.toUpperCase() == 'PAID' ||
+        _date(j['final_paid_at']) != null ||
+        (_str(j['final_transaction_id'])?.isNotEmpty ?? false),
+    // Phase 4. Whether a HUMAN has confirmed the balance (which `payment_status`
+    // above does not answer), and whether the prescription is therefore open.
+    remainingPaymentStatus: _str(j['remaining_payment_status']) ?? 'PENDING',
+    prescriptionUnlocked: j['prescription_unlocked'] == true,
     patientPhone: _str(j['patient_phone']),
     // Milestone tracker block, derived server-side from `status` (see
     // backend/src/utils/bookingMilestones.js). Older backends omit these —
@@ -389,6 +448,8 @@ UpcomingAppointment upcomingAppointmentFromMongo(Map<String, dynamic> j) {
     patientPhone: _str(j['patient_phone']),
     patientAccountId: _str(j['patient_account_id']),
     paymentPreference: _str(j['payment_preference']),
+    // Server-derived cash gate — see UpcomingAppointment.isCashOnService.
+    cashCollectionRequired: j['cash_collection_required'] as bool?,
     careRecipient: CareRecipientInfo.fromJson(
       j['care_recipient'],
       ageSex: _str(j['patient_age_sex']) ?? '',

@@ -20,6 +20,14 @@ import 'service_catalog_item.dart';
 /// Sentinel chip that disables filtering entirely.
 const String kServiceCategoryAll = 'All';
 
+/// Slug form of the sentinel, and the value [selectedCategoryProvider] holds
+/// while the Home rail is unfiltered.
+///
+/// Lives here rather than on [HomeCategory] — which re-exports it as
+/// `HomeCategory.allSlug` — so this library stays the bottom of the dependency
+/// chain: the category model imports the vocabulary, never the reverse.
+const String kCategoryAllSlug = 'all';
+
 const String kServiceCategoryPostOp = 'Post-op';
 const String kServiceCategoryDoctorInHome = 'Doctor in Home';
 
@@ -97,7 +105,73 @@ String normalizeServiceCategory(String? raw) {
 /// Everything else is an exact match on the *normalized* category — notably
 /// **not** a substring search over the title, which is what used to make the
 /// 'Post-op' chip catch any service whose name happened to mention surgery.
+///
+/// Superseded on Home by the slug join in [serviceMatchesCategorySlug], which
+/// the admin-managed rail needs; still used by the label-driven filters that
+/// have no category document to match against (the standalone service catalog
+/// screen, the banner target picker).
 bool serviceMatchesCategoryChip(ServiceCatalogItem item, String chip) {
   if (chip == kServiceCategoryAll) return true;
   return normalizeServiceCategory(item.category) == chip;
+}
+
+final RegExp _slugSeparators = RegExp(r'[^a-z0-9]+');
+final RegExp _edgeHyphens = RegExp(r'^-+|-+$');
+
+/// Any label → lowercase kebab-case. 'Doctor in Home' → `doctor-in-home`.
+///
+/// MIRROR: `slugify` in backend/src/utils/serviceCategories.js.
+String slugifyCategory(String? raw) => (raw ?? '')
+    .trim()
+    .toLowerCase()
+    .replaceAll(_slugSeparators, '-')
+    .replaceAll(_edgeHyphens, '');
+
+/// The join key between a service's free-text category and a [HomeCategory].
+///
+/// Differs from [normalizeServiceCategory] in one way that matters: that
+/// function collapses anything outside [kServiceCategories] to `''`, which was
+/// correct while the chip rail was a fixed list — an unrecognised value had no
+/// pill to belong to. Now that admins mint pills at runtime, 'Nursing' is a
+/// perfectly good category the alias table has simply never heard of, so an
+/// unrecognised value slugifies as itself instead of vanishing.
+///
+/// The alias fold still runs first, so a service stored as 'Recovery' resolves
+/// to `post-op` and keeps matching the Post-op pill exactly as it does today.
+/// Returns `''` for uncategorized services: they match no pill and stay
+/// visible under "All".
+///
+/// MIRROR: `categorySlug` in backend/src/utils/serviceCategories.js. The API
+/// resolves this server-side for every card it sends; the client keeps its own
+/// copy for the offline / old-backend fallback path, where cards are built
+/// straight from `/api/services`.
+String categorySlugFor(String? raw) {
+  final trimmed = (raw ?? '').trim();
+  if (trimmed.isEmpty) return '';
+  final canonical = _aliases[_squash(trimmed)];
+  return slugifyCategory(canonical ?? trimmed);
+}
+
+/// True when a card tagged [cardSlug] belongs under the [selectedSlug] pill.
+///
+/// [kCategoryAllSlug] matches everything, including untagged cards. A null or
+/// blank [cardSlug] means untagged, which matches nothing else — an
+/// uncategorized service must not leak into an unrelated filter.
+bool serviceMatchesCategorySlug(String? cardSlug, String selectedSlug) {
+  if (selectedSlug == kCategoryAllSlug || selectedSlug.isEmpty) return true;
+  return (cardSlug ?? '').isNotEmpty && cardSlug == selectedSlug;
+}
+
+/// [serviceMatchesCategorySlug] for a card carrying several pills.
+///
+/// One service can be assigned to multiple categories in the CMS, so a card's
+/// membership is a set rather than a single value: it belongs under
+/// [selectedSlug] when *any* of [cardSlugs] matches. An empty set is untagged
+/// and matches only [kCategoryAllSlug].
+bool serviceMatchesAnyCategorySlug(
+  Iterable<String> cardSlugs,
+  String selectedSlug,
+) {
+  if (selectedSlug == kCategoryAllSlug || selectedSlug.isEmpty) return true;
+  return cardSlugs.any((s) => s.isNotEmpty && s == selectedSlug);
 }

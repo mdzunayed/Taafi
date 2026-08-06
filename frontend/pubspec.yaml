@@ -36,7 +36,10 @@ dependencies:
   go_router: ^14.6.1
   dio: ^5.7.0
   shared_preferences: ^2.3.3
-  google_maps_flutter: ^2.10.0
+  # NOTE: google_maps_flutter was removed with the patient map view — no Dart
+  # code imported it, and the Android manifest only ever carried a placeholder
+  # API key. The two surfaces that DO show a map (admin live monitor, chat
+  # location messages) use flutter_map + OpenStreetMap, which needs no key.
   geolocator: ^13.0.2
   google_fonts: ^6.2.1
   flutter_svg: ^2.0.10+1
@@ -55,6 +58,14 @@ dependencies:
   printing: ^5.13.4
   path_provider: ^2.1.4
   open_filex: ^4.5.0
+  # In-app PDF rendering for patient-attached medical records. `pdf` above
+  # only WRITES documents (prescription pads) and `printing` lays those out —
+  # neither displays an arbitrary PDF we fetched. A clinician standing at a
+  # patient's door reading a discharge summary must not get bounced into
+  # another app mid-visit, so the viewer is embedded. Backed by native
+  # AndroidPdfViewer / PDFKit, and it renders from a local file path, which is
+  # why the viewer downloads the grant's bytes to a temp file first.
+  flutter_pdfview: ^1.4.1
   flutter_map: ^8.1.1
   latlong2: ^0.9.1
   image: ^4.8.0

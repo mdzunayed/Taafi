@@ -10,14 +10,18 @@
 class CareRequestStatus {
   CareRequestStatus._();
 
-  /// Two-phase booking confirmation states (see CareRequest.js enum).
-  ///
-  /// Phase 1 — booking created but the fixed ৳100 confirmation deposit has
-  /// NOT been paid yet. The slot is not locked and admins don't see it.
+  /// LEGACY — booking created but a fixed deposit had not been paid yet.
+  /// Retired by the zero-cost flow (new bookings are created [submitted]),
+  /// but in-flight rows remain payable from here.
   static const String awaitingDeposit = 'awaiting_deposit';
 
-  /// Phase 1 complete — ৳100 deposit confirmed; the booking is in the
-  /// admin care-management review queue awaiting a final service fee.
+  /// Phase 2 — the admin ran the review call and committed BOTH the total
+  /// service fee and the deposit THIS booking must pay. The patient now owes
+  /// that deposit; no provider is dispatched until it clears.
+  static const String depositRequired = 'deposit_required';
+
+  /// Phase 3 — the admin-set deposit is confirmed; the booking awaits
+  /// deposit verification and team assignment.
   static const String depositPaidAdminReviewing = 'deposit_paid_admin_reviewing';
 
   /// LEGACY pay-before-service state — the admin set the fee and the
@@ -33,7 +37,8 @@ class CareRequestStatus {
   static const String serviceCompletedAwaitingFinalPayment =
       'service_completed_awaiting_final_payment';
 
-  /// Just submitted by the patient — awaiting admin triage.
+  /// Phase 1 — just submitted by the patient, free of charge, awaiting the
+  /// admin's review call. This is where every new booking starts.
   static const String submitted = 'submitted';
 
   /// Admin approved triage but no doctor matched yet.

@@ -335,6 +335,12 @@ class UpcomingAppointment extends Equatable {
   /// mandatory rather than skippable.
   final String? paymentPreference;
 
+  /// The server's verdict on whether a provider may still collect cash for
+  /// this visit (`cash_collection_required`, derived from the settlement AND
+  /// the preference AND the outstanding amount). Null on backends that
+  /// predate it, where [paymentPreference] alone is the best guess available.
+  final bool? cashCollectionRequired;
+
   const UpcomingAppointment({
     required this.id,
     required this.startTime,
@@ -347,11 +353,17 @@ class UpcomingAppointment extends Equatable {
     this.patientPhone,
     this.patientAccountId,
     this.paymentPreference,
+    this.cashCollectionRequired,
     this.careRecipient,
   });
 
-  /// True when the patient has committed to paying this visit in cash.
-  bool get isCashOnService => paymentPreference == 'CASH_ON_SERVICE';
+  /// True when this visit still owes a cash balance the provider must collect.
+  /// Prefers the server's own answer — the patient may have switched to (or
+  /// completed) online payment since [paymentPreference] was recorded, which
+  /// is exactly the drift that used to strand a "Collect Cash · Required"
+  /// prompt on the clinician's screen.
+  bool get isCashOnService =>
+      cashCollectionRequired ?? (paymentPreference == 'CASH_ON_SERVICE');
 
   /// True while admin has assigned but the doctor hasn't accepted yet —
   /// the tile renders an inline Accept button only in this case.
@@ -377,6 +389,7 @@ class UpcomingAppointment extends Equatable {
         patientPhone,
         patientAccountId,
         paymentPreference,
+        cashCollectionRequired,
         careRecipient,
       ];
 
@@ -398,6 +411,8 @@ class UpcomingAppointment extends Equatable {
       paymentPreference: (json['paymentPreference'] ??
               json['payment_preference'])
           ?.toString(),
+      cashCollectionRequired: (json['cashCollectionRequired'] ??
+          json['cash_collection_required']) as bool?,
       careRecipient: CareRecipientInfo.fromJson(
         json['careRecipient'] ?? json['care_recipient'],
         ageSex: (json['patientAgeSex'] ?? json['patient_age_sex'] ?? '')

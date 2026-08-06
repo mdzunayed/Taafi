@@ -35,12 +35,24 @@ class DynamicHomeSections extends ConsumerWidget {
     final sectionsAsync = ref.watch(activeHomeSectionsProvider);
     return sectionsAsync.maybeWhen(
       data: (sections) {
-        final renderable = sections
-            .where((s) =>
+        // Hidden cards are already stripped server-side; re-filtering here
+        // keeps a section from rendering as an empty block when the app is
+        // talking to a backend that predates per-card visibility.
+        final renderable = <HomeSection>[
+          for (final s in sections)
+            // CARE_SERVICES is reserved: it backs the Care Services block
+            // above (which reads its title and `layoutType`), so rendering it
+            // here as well would draw the block twice.
+            if (!s.isCareServices &&
                 s.isActive &&
-                s.contentData.isNotEmpty &&
                 HomeSection.supportedTemplates.contains(s.uiTemplate))
-            .toList();
+              s.copyWith(
+                contentData: [
+                  for (final item in s.contentData)
+                    if (item.isActive) item,
+                ],
+              ),
+        ].where((s) => s.contentData.isNotEmpty).toList();
         if (renderable.isEmpty) return const SizedBox.shrink();
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -60,13 +72,41 @@ final _dynamicMoneyFmt = NumberFormat('#,###', 'en_US');
 /// Numeric content (e.g. "৳2400", "2400") → `৳ 2,400`, matching
 /// [careServicePrice] so the two rails read identically; non-numeric text
 /// (e.g. "Free") passes through verbatim; blank → null (line omitted).
-String? _dynamicPriceLine(String? tag) {
+String? dynamicPriceLine(String? tag) {
   final raw = tag?.trim();
   if (raw == null || raw.isEmpty) return null;
   final digits = raw.replaceAll(RegExp(r'[^0-9]'), '');
   final n = int.tryParse(digits);
   if (n == null) return raw;
   return '৳ ${_dynamicMoneyFmt.format(n)}';
+}
+
+/// The card title, with its Bengali counterpart on a second line when the
+/// admin supplied one.
+///
+/// There is no app-wide locale switch, so both scripts show at once — the same
+/// treatment the section header already gives `titleBn`. Both title and
+/// description slots on [CareServiceCard] allow exactly two lines, so the pair
+/// fits without changing the card's silhouette.
+///
+/// Public so the CMS preview can compose its strings identically; a preview
+/// that formats its own text drifts from the app the moment either side moves.
+String dynamicCardTitle(HomeSectionItem item) =>
+    _joinBilingual(item.title, item.titleBn);
+
+/// The description line — the English subtitle over its Bengali counterpart.
+/// Null until the admin sets an explicit badge, since on a legacy card the
+/// subtitle is still the badge (see [HomeSectionItem.descriptionLine]).
+String? dynamicCardDescription(HomeSectionItem item) {
+  final en = item.descriptionLine;
+  final bn = item.subtitleBn?.trim();
+  if (en == null || en.isEmpty) return (bn == null || bn.isEmpty) ? null : bn;
+  return _joinBilingual(en, bn);
+}
+
+String _joinBilingual(String en, String? bn) {
+  final b = bn?.trim();
+  return (b == null || b.isEmpty) ? en : '$en\n$b';
 }
 
 /// Header + template body + bottom gap for one section. The 24 px bottom gap
@@ -161,13 +201,14 @@ class _DynamicCardRail extends StatelessWidget {
     final dark = Theme.of(context).brightness == Brightness.dark;
     final styles = item.cardStyles;
     final accent = styles?.accent(dark);
-    final subtitle = item.subtitle?.trim();
     return CareServiceCard(
-      title: item.title,
-      // The SDUI model has no description field — `subtitle` is already spent
-      // on the badge, so these cards run title + price only.
-      categoryLabel: subtitle,
-      priceLabel: _dynamicPriceLine(item.priceTag),
+      title: dynamicCardTitle(item),
+      // Once the admin sets an explicit badge, `subtitle` is freed to become a
+      // real description line; on a legacy card it is still the badge and
+      // `descriptionLine` stays null. See [HomeSectionItem.badgeLabel].
+      description: dynamicCardDescription(item),
+      categoryLabel: item.badgeLabel,
+      priceLabel: dynamicPriceLine(item.priceTag),
       imageUrl: item.imageUrl,
       onTap: () => onItemTap(item),
       cardColor: styles?.cardBg(dark),
@@ -257,15 +298,14 @@ class _Grid2x2Tiles extends StatelessWidget {
                 fit: StackFit.expand,
                 children: [
                   CareCardImage(url: item.imageUrl, fallbackIcon: Icons.image_outlined),
-                  if (item.subtitle != null &&
-                      item.subtitle!.trim().isNotEmpty)
+                  if (item.badgeLabel != null)
                     Positioned(
                       left: 8,
                       top: 8,
                       child: CareCardCategoryBadge(
-                        label: item.subtitle!.trim(),
+                        label: item.badgeLabel!,
                         accent: ServiceCategoryTheme.accentFor(
-                            context, item.subtitle),
+                            context, item.badgeLabel),
                         background: item.cardStyles?.tagBg,
                         textColor: item.cardStyles?.tagText,
                       ),
@@ -283,8 +323,10 @@ class _Grid2x2Tiles extends StatelessWidget {
                         ),
                       ),
                       child: Text(
-                        item.title,
-                        maxLines: 1,
+                        dynamicCardTitle(item),
+                        // Two lines so an admin-supplied Bengali title lands
+                        // under the English one instead of being clipped.
+                        maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                         style: MtTextStyles.labelLg
                             .copyWith(color: Colors.white),
@@ -311,7 +353,7 @@ class _SingleWideBanner extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final priceLine = _dynamicPriceLine(item.priceTag);
+    final priceLine = dynamicPriceLine(item.priceTag);
     final dark = Theme.of(context).brightness == Brightness.dark;
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -325,14 +367,14 @@ class _SingleWideBanner extends StatelessWidget {
             fit: StackFit.expand,
             children: [
               CareCardImage(url: item.imageUrl, fallbackIcon: Icons.image_outlined),
-              if (item.subtitle != null && item.subtitle!.trim().isNotEmpty)
+              if (item.badgeLabel != null)
                 Positioned(
                   left: 8,
                   top: 8,
                   child: CareCardCategoryBadge(
-                    label: item.subtitle!.trim(),
+                    label: item.badgeLabel!,
                     accent:
-                        ServiceCategoryTheme.accentFor(context, item.subtitle),
+                        ServiceCategoryTheme.accentFor(context, item.badgeLabel),
                     background: item.cardStyles?.tagBg,
                     textColor: item.cardStyles?.tagText,
                   ),
@@ -354,8 +396,8 @@ class _SingleWideBanner extends StatelessWidget {
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       Text(
-                        item.title,
-                        maxLines: 1,
+                        dynamicCardTitle(item),
+                        maxLines: 2,
                         overflow: TextOverflow.ellipsis,
                         style: MtTextStyles.h3.copyWith(color: Colors.white),
                       ),

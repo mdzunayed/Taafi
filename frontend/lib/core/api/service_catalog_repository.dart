@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
@@ -240,6 +241,8 @@ class ServiceCatalogRepository {
     required double price,
     String description = '',
     String category = '',
+    List<String> categoryIds = const [],
+    bool isUrgentAvailable = false,
     ProviderType? providerType,
     String? duration,
     ServiceCatalogStatus status = ServiceCatalogStatus.active,
@@ -250,6 +253,8 @@ class ServiceCatalogRepository {
       'price': price.toString(),
       'description': description,
       'category': category,
+      'categoryIds': jsonEncode(categoryIds),
+      'isUrgentAvailable': isUrgentAvailable.toString(),
       // Empty means "leave untagged" — the API keeps inferring a role from the
       // title/category rather than freezing an unreviewed guess.
       'provider_type': providerType?.toWire() ?? '',
@@ -276,6 +281,12 @@ class ServiceCatalogRepository {
       'price': item.price.toString(),
       'description': item.description,
       'category': item.category,
+      // Always sent, even when empty. Multipart drops an absent key, and the
+      // API reads "absent" as "leave the assignment alone" — so omitting it
+      // would make un-ticking every pill impossible. A JSON string rather than
+      // repeated fields for the same reason: `[]` has to survive the wire.
+      'categoryIds': jsonEncode(item.categoryIds),
+      'isUrgentAvailable': item.isUrgentAvailable.toString(),
       'provider_type': item.providerType?.toWire() ?? '',
       'duration': item.duration ?? '',
       'status': item.status.name,

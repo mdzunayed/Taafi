@@ -15,6 +15,7 @@ import '../../prescriptions/prescription_entry.dart';
 import '../../prescriptions/prescription_pad_actions.dart';
 import '../providers/doctor_workflow_provider.dart';
 import 'collect_cash_panel.dart';
+import 'widgets/patient_documents_panel.dart';
 import 'widgets/target_patient_panel.dart';
 
 /// Phase 3 + 4 of the Doctor Operations Hub: a full-screen overlay that
@@ -172,10 +173,23 @@ class _ActiveCareConsoleScreenState
                     padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
                     children: [
                       _PatientHeaderCard(appt: _appt),
-                      if (_appt.isCashOnService) ...[
-                        const SizedBox(height: 12),
-                        const CashOnServiceBadge(),
-                      ],
+                      // Payment posture, stated up front so the doctor knows
+                      // before they start whether a cash handoff is coming —
+                      // and kept live, so a patient switching to (or
+                      // completing) online payment mid-visit flips this card
+                      // instead of leaving a stale cash prompt on screen.
+                      const SizedBox(height: 12),
+                      BookingPaymentBanner(
+                        bookingId: _appt.id,
+                        fallbackIsCashOnService: _appt.isCashOnService,
+                      ),
+                      // What the patient brought with them — discharge
+                      // summaries, old prescriptions, lab reports. Above the
+                      // vault because it is the case history the doctor did
+                      // not write and cannot infer, and it is most useful
+                      // before the consultation rather than after it.
+                      const SizedBox(height: 12),
+                      PatientDocumentsPanel(bookingId: _appt.id),
                       const SizedBox(height: 16),
                       _SectionLabel('Patient intake & medical vault'),
                       const SizedBox(height: 8),

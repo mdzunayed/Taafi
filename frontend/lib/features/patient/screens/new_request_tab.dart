@@ -1,11 +1,12 @@
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:intl/intl.dart';
 
 import '../../../core/api/patient_home_repository.dart';
 import '../../../core/api/service_catalog_providers.dart';
 import '../../../core/models/dependent.dart';
+import '../../../core/models/request_document.dart';
 import '../../../core/models/saved_address.dart';
 import '../../../core/models/service_catalog_item.dart';
 import '../../../core/theme/app_colors_ext.dart';
@@ -14,13 +15,14 @@ import '../../../core/utils/age.dart';
 import '../../../core/widgets/async_value_view.dart';
 import '../../../core/widgets/mt_empty_state.dart';
 import '../../../core/widgets/mt_skeleton.dart';
+import '../../auth/auth_provider.dart' show dioClientProvider;
+import '../checkout/booking_summary_screen.dart';
+import '../checkout/widgets/booking_stepper.dart';
 import '../navigation/patient_nav_provider.dart';
 import '../new_request/new_request_notifier.dart';
 import '../new_request/new_request_state.dart';
 import '../profile/patient_lifecycle_providers.dart';
-import 'booking_flow_pages.dart';
 import 'family_profiles_screen.dart';
-import 'select_address_sheet.dart';
 import 'widgets/active_booking_banner.dart';
 
 /// New care-request flow. Pure ConsumerWidget — all form state lives in
@@ -32,10 +34,17 @@ class NewRequestTab extends ConsumerStatefulWidget {
   ConsumerState<NewRequestTab> createState() => _NewRequestTabState();
 }
 
+/// Mirrors the 8 MB cap on `POST /patient/documents` (multer). Checked
+/// client-side too so an oversized scan fails instantly instead of after a
+/// full upload.
+const int _kMaxDocumentBytes = 8 * 1024 * 1024;
+
 class _NewRequestTabState extends ConsumerState<NewRequestTab> {
   late final TextEditingController _notesController;
-  bool _showLandmarkField = false;
-  late final TextEditingController _landmarkController;
+
+  /// A document upload is in flight — the attach row shows a spinner and
+  /// refuses a second pick until it lands.
+  bool _uploadingDocument = false;
   // Tracks whether the form has been hydrated from the notifier on first
   // build, so we don't fight the user every time they type.
   String? _lastNotesSnapshot;
@@ -48,13 +57,11 @@ class _NewRequestTabState extends ConsumerState<NewRequestTab> {
   void initState() {
     super.initState();
     _notesController = TextEditingController();
-    _landmarkController = TextEditingController();
   }
 
   @override
   void dispose() {
     _notesController.dispose();
-    _landmarkController.dispose();
     _scrollController.dispose();
     super.dispose();
   }
@@ -90,78 +97,17 @@ class _NewRequestTabState extends ConsumerState<NewRequestTab> {
       );
     }
     _lastNotesSnapshot = s.notes;
-
-    final landmark = s.address.landmark ?? '';
-    if (landmark != _landmarkController.text) {
-      _landmarkController.text = landmark;
-      _landmarkController.selection = TextSelection.collapsed(
-        offset: landmark.length,
-      );
-    }
-    if (landmark.isNotEmpty && !_showLandmarkField) {
-      _showLandmarkField = true;
-    }
   }
 
-  Future<void> _handleSubmit(BuildContext context, WidgetRef ref) async {
-    final messenger = ScaffoldMessenger.of(context);
-    final dangerColor = context.appColors.danger;
-    final id = await ref.read(newRequestProvider.notifier).submit();
-    if (!mounted) return;
-
-    if (id == null) {
-      // Failure path. `cachedLocally` distinguishes a network outage
-      // (preserved form, retry possible) from a validation / unexpected
-      // error. The icon hints the user that nothing was lost.
-      final postState = ref.read(newRequestProvider);
-      final isOffline = postState.cachedLocally;
-      final err = postState.validationError;
-      if (err != null) {
-        messenger.showSnackBar(
-          SnackBar(
-            content: Row(
-              children: [
-                Icon(
-                  isOffline ? Icons.cloud_off : Icons.error_outline,
-                  color: Colors.white,
-                  size: 18,
-                ),
-                const SizedBox(width: 8),
-                Expanded(child: Text(err)),
-              ],
-            ),
-            backgroundColor: dangerColor,
-            duration: Duration(seconds: isOffline ? 5 : 4),
-          ),
-        );
-      }
-      return;
-    }
-
-    final serviceName =
-        ref.read(newRequestProvider).selectedService?.title ?? '';
-    // Clear the submission flag so the button re-enables if the patient
-    // stays on the form (e.g. for a second submission later).
-    ref.read(newRequestProvider.notifier).clearSubmissionStatus();
-
-    // Phase 1 — present the ৳100 confirmation deposit gateway. The booking
-    // was created as `awaiting_deposit`; paying the deposit locks the slot
-    // and moves it into the admin review queue. If the patient dismisses
-    // the sheet without paying, they can still complete the deposit from
-    // the Under Review tab.
-    if (!context.mounted) return;
-    await showConfirmAppointmentRequestSheet(
-      context,
-      bookingId: id,
-      serviceName: serviceName,
-    );
-    if (!mounted) return;
-
-    // Route the patient to the Activities → "Under Review" sub-tab.
-    // The bottom-nav shell exposes a single `goToActivities(...)`
-    // helper that coordinates both providers atomically — no widget
-    // here has to know which destination owns which sub-tab.
-    ref.goToActivities(sub: PatientActivitiesTab.underReview);
+  /// Step 1 → Step 2. Nothing is sent to the backend here: the booking is
+  /// only created once the patient confirms on the Checkout step, so backing
+  /// out of the summary leaves no orphaned `awaiting_deposit` rows behind.
+  void _continueToSummary() {
+    HapticFeedback.lightImpact();
+    // Commit anything still sitting in the notes field (the patient can tap
+    // Continue without unfocusing it).
+    ref.read(newRequestProvider.notifier).setNotes(_notesController.text);
+    Navigator.of(context).push(BookingSummaryScreen.route());
   }
 
   @override
@@ -181,25 +127,12 @@ class _NewRequestTabState extends ConsumerState<NewRequestTab> {
       },
     );
 
-    // Auto-select the first service once the catalog loads — keeps the form
-    // immediately usable rather than blocking on an explicit tap.
-    ref.listen<AsyncValue<List<ServiceCatalogItem>>>(activeServicesProvider,
-        (prev, next) {
-      next.whenData((list) {
-        final current = ref.read(newRequestProvider).selectedService;
-        if (current == null && list.isNotEmpty) {
-          // Defer to the next frame so we don't mutate state mid-build.
-          Future.microtask(() {
-            if (!mounted) return;
-            final stillEmpty =
-                ref.read(newRequestProvider).selectedService == null;
-            if (stillEmpty) {
-              ref.read(newRequestProvider.notifier).selectService(list.first);
-            }
-          });
-        }
-      });
-    });
+    // The catalog deliberately opens with nothing selected. It used to
+    // auto-select `list.first` to keep the form immediately usable, but that
+    // put a service the patient never chose behind an enabled "Continue" — and
+    // once the form stopped being reset between visits it was indistinguishable
+    // from stale state. `validate()` already has the message for the empty
+    // case, and the submit bar stays disabled until a real choice is made.
 
     // Hydrate the location card from the user's saved-address book. The API
     // returns the default (`is_default`) address first, so `list.first` is the
@@ -266,35 +199,9 @@ class _NewRequestTabState extends ConsumerState<NewRequestTab> {
               const SizedBox(height: 8),
               _CareRecipientChips(selected: state.careRecipient),
               const SizedBox(height: 20),
-              const _SectionHeader(
-                en: 'Patient location',
-                bn: 'রোগীর ঠিকানা',
-              ),
-              const SizedBox(height: 8),
-              _LocationCard(
-                address: state.address,
-                showLandmarkField: _showLandmarkField,
-                landmarkController: _landmarkController,
-                onEdit: () => _openAddressPicker(context, ref),
-                onToggleLandmark: () =>
-                    setState(() => _showLandmarkField = !_showLandmarkField),
-                onLandmarkChanged: (v) =>
-                    ref.read(newRequestProvider.notifier).setLandmark(
-                          v.trim().isEmpty ? null : v.trim(),
-                        ),
-              ),
-              const SizedBox(height: 20),
-              const _SectionHeader(en: 'When', bn: 'কখন'),
-              const SizedBox(height: 8),
-              _WhenSelector(
-                timing: state.timing,
-                scheduledAt: state.scheduledAt,
-                onAsap: () => ref
-                    .read(newRequestProvider.notifier)
-                    .setTiming(RequestTiming.asSoonAsPossible),
-                onSchedule: () => _pickSchedule(context, ref, state),
-              ),
-              const SizedBox(height: 20),
+              // Location + timing moved to the Checkout step (step 3) —
+              // this step answers *what care and for whom*, checkout answers
+              // *where, when and how you pay*.
               const _SectionHeader(
                 en: 'Notes for medical team',
                 bn: 'চিকিৎসা সংক্রান্ত তথ্য',
@@ -302,18 +209,13 @@ class _NewRequestTabState extends ConsumerState<NewRequestTab> {
               const SizedBox(height: 8),
               _NotesCard(
                 controller: _notesController,
-                attachments: state.attachments,
+                documents: state.documents,
+                uploading: _uploadingDocument,
                 onNotesChanged: (v) =>
                     ref.read(newRequestProvider.notifier).setNotes(v),
-                onAttachDischarge: () => _attachDischarge(context, ref),
-                onAttachVitals: () => _attachVitals(context, ref, state),
-                onAttachVoice: () => _attachVoiceNote(context, ref),
-                onClearDischarge: () =>
-                    ref.read(newRequestProvider.notifier).setDischarge(null),
-                onClearVitals: () =>
-                    ref.read(newRequestProvider.notifier).setVitals(null),
-                onClearVoice: () =>
-                    ref.read(newRequestProvider.notifier).setVoiceNote(null),
+                onAttachDocument: _attachDocument,
+                onRemoveDocument: (d) =>
+                    ref.read(newRequestProvider.notifier).removeDocument(d),
               ),
               if (state.validationError != null) ...[
                 const SizedBox(height: 12),
@@ -325,15 +227,12 @@ class _NewRequestTabState extends ConsumerState<NewRequestTab> {
         ),
         _SubmitBar(
           // One booking at a time — `POST /patient/requests` answers 409
-          // while a non-terminal request is open, so the form is sealed and
-          // the banner offers the way out (jump to the open booking).
+          // while a non-terminal request is open, so the flow is sealed at
+          // its entrance and the banner offers the way out (jump to the open
+          // booking) rather than letting the patient reach checkout first.
           blocked: hasActiveBooking,
-          enabled: state.selectedService != null &&
-              !state.address.isEmpty &&
-              !state.isSubmitting &&
-              !hasActiveBooking,
-          isLoading: state.isSubmitting,
-          onSubmit: () => _handleSubmit(context, ref),
+          enabled: state.selectedService != null && !hasActiveBooking,
+          onSubmit: _continueToSummary,
         ),
       ],
       ),
@@ -342,18 +241,9 @@ class _NewRequestTabState extends ConsumerState<NewRequestTab> {
 
   // --------------------------------------------------------------- dialogs
 
-  // Checkout address selection — opens the saved-address picker. Tapping a
-  // saved card applies its structured fields + GPS coordinates straight into
-  // the booking state; the sheet's "Manage / add" routes to the full editor.
-  Future<void> _openAddressPicker(BuildContext context, WidgetRef ref) async {
-    final picked = await showSelectAddressSheet(context);
-    if (picked == null) return;
-    ref.read(newRequestProvider.notifier).applyAddress(_toRequestAddress(picked));
-  }
-
   /// Maps a saved-address-book entry into the booking form's [RequestAddress].
-  /// Shared by the address picker and the default-address hydration listener
-  /// so both produce an identical shape.
+  /// Used by the default-address hydration listener above; the Checkout step
+  /// applies the same mapping when the patient picks a different address.
   static RequestAddress _toRequestAddress(SavedAddress a) {
     return RequestAddress(
       line1: a.flatFloorHolding,
@@ -367,164 +257,69 @@ class _NewRequestTabState extends ConsumerState<NewRequestTab> {
     );
   }
 
-  Future<void> _pickSchedule(
-    BuildContext context,
-    WidgetRef ref,
-    NewRequestState state,
-  ) async {
-    final now = DateTime.now();
-    final initialDate = state.scheduledAt ?? now.add(const Duration(hours: 4));
-    // No Theme override: MtTheme.light()/dark() already supply a correct
-    // per-brightness ColorScheme, so the pickers follow the active theme.
-    final date = await showDatePicker(
-      context: context,
-      initialDate: initialDate.isBefore(now) ? now : initialDate,
-      firstDate: now,
-      lastDate: now.add(const Duration(days: 30)),
-    );
-    if (date == null || !mounted) return;
-    final time = await showTimePicker(
-      // ignore: use_build_context_synchronously
-      context: context,
-      initialTime: TimeOfDay.fromDateTime(initialDate),
-    );
-    if (time == null) return;
-    final picked = DateTime(date.year, date.month, date.day, time.hour, time.minute);
-    ref.read(newRequestProvider.notifier).setScheduledAt(picked);
-  }
+  /// Attach a previous medical document (PDF or image) from device storage.
+  ///
+  /// Uploads immediately rather than at submit: the booking doesn't exist
+  /// yet, and uploading here means the patient sees a failure (wrong type,
+  /// too large, no signal) while they can still do something about it,
+  /// instead of at the moment they confirm and pay.
+  Future<void> _attachDocument() async {
+    if (_uploadingDocument) return;
+    final messenger = ScaffoldMessenger.of(context);
+    final dangerColor = context.appColors.danger;
 
-  Future<void> _attachDischarge(BuildContext context, WidgetRef ref) async {
-    // Production-ready placeholder: opens a dialog asking the patient to
-    // confirm they have a discharge summary on file. Wires to file_picker
-    // in a follow-up pass without changing this UI surface.
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-        ),
-        title: Text('Attach discharge summary', style: MtTextStyles.h3),
-        content: Text(
-          'Confirm the patient has a discharge summary or recent prescription. The doctor team will review it on arrival.',
-          style: MtTextStyles.bodyMd
-              .copyWith(color: dialogContext.appColors.body),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: Text('Cancel', style: MtTextStyles.labelMd),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            style: TextButton.styleFrom(
-              foregroundColor: dialogContext.appColors.brand,
-            ),
-            child: Text('Attach', style: MtTextStyles.labelMd),
-          ),
-        ],
-      ),
+    final picked = await FilePicker.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: const ['pdf', 'jpg', 'jpeg', 'png', 'webp'],
+      // The bytes are what we post; on mobile the picker only fills `path`
+      // unless this is set.
+      withData: true,
     );
-    if (confirmed == true) {
-      ref.read(newRequestProvider.notifier).setDischarge('discharge_summary.pdf');
+    final file = picked?.files.firstOrNull;
+    final bytes = file?.bytes;
+    if (file == null || bytes == null) return;
+
+    if (bytes.length > _kMaxDocumentBytes) {
+      messenger.showSnackBar(SnackBar(
+        content: const Text('That file is larger than the 8 MB limit.'),
+        backgroundColor: dangerColor,
+      ));
+      return;
+    }
+
+    setState(() => _uploadingDocument = true);
+    try {
+      final doc = await ref.read(dioClientProvider).uploadPatientDocument(
+            bytes: bytes,
+            filename: file.name,
+            mimeType: _mimeForExtension(file.extension),
+          );
+      if (!mounted) return;
+      ref.read(newRequestProvider.notifier).addDocument(doc);
+    } catch (e) {
+      if (!mounted) return;
+      final raw = e.toString().replaceFirst('Exception: ', '');
+      messenger.showSnackBar(SnackBar(
+        content: Text(raw.length > 160 ? '${raw.substring(0, 160)}…' : raw),
+        backgroundColor: dangerColor,
+      ));
+    } finally {
+      if (mounted) setState(() => _uploadingDocument = false);
     }
   }
 
-  Future<void> _attachVitals(
-    BuildContext context,
-    WidgetRef ref,
-    NewRequestState state,
-  ) async {
-    final existing = state.attachments.vitals;
-    final bpCtrl = TextEditingController();
-    final hrCtrl = TextEditingController();
-    final tempCtrl = TextEditingController();
-
-    // If we already have a vitals string, pre-fill best-effort.
-    if (existing != null) {
-      final bp = RegExp(r'BP\s+([0-9/]+)').firstMatch(existing)?.group(1);
-      final hr = RegExp(r'HR\s+([0-9]+)').firstMatch(existing)?.group(1);
-      final tp = RegExp(r'Temp\s+([0-9.]+)').firstMatch(existing)?.group(1);
-      if (bp != null) bpCtrl.text = bp;
-      if (hr != null) hrCtrl.text = hr;
-      if (tp != null) tempCtrl.text = tp;
-    }
-
-    final result = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
-        ),
-        title: Text('Add vitals', style: MtTextStyles.h3),
-        content: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              _DialogField(
-                controller: bpCtrl,
-                label: 'Blood pressure (e.g. 120/80)',
-                keyboardType: TextInputType.text,
-                autofocus: true,
-              ),
-              const SizedBox(height: 12),
-              _DialogField(
-                controller: hrCtrl,
-                label: 'Heart rate (bpm)',
-                keyboardType: TextInputType.number,
-                inputFormatters: [FilteringTextInputFormatter.digitsOnly],
-              ),
-              const SizedBox(height: 12),
-              _DialogField(
-                controller: tempCtrl,
-                label: 'Temperature (°F)',
-                keyboardType:
-                    const TextInputType.numberWithOptions(decimal: true),
-              ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: Text('Cancel', style: MtTextStyles.labelMd),
-          ),
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            style: TextButton.styleFrom(
-              foregroundColor: dialogContext.appColors.brand,
-            ),
-            child: Text('Save', style: MtTextStyles.labelMd),
-          ),
-        ],
-      ),
-    );
-
-    if (result == true) {
-      final parts = <String>[];
-      if (bpCtrl.text.trim().isNotEmpty) parts.add('BP ${bpCtrl.text.trim()}');
-      if (hrCtrl.text.trim().isNotEmpty) parts.add('HR ${hrCtrl.text.trim()}');
-      if (tempCtrl.text.trim().isNotEmpty) {
-        parts.add('Temp ${tempCtrl.text.trim()}°F');
-      }
-      final summary = parts.isEmpty ? null : parts.join(' · ');
-      ref.read(newRequestProvider.notifier).setVitals(summary);
-    }
-    bpCtrl.dispose();
-    hrCtrl.dispose();
-    tempCtrl.dispose();
-  }
-
-  Future<void> _attachVoiceNote(BuildContext context, WidgetRef ref) async {
-    // Simulated record dialog (real audio recording will be wired in a
-    // follow-up). Times a fake recording so the chip shows a duration label.
-    final seconds = await showDialog<int>(
-      context: context,
-      barrierDismissible: false,
-      builder: (dialogContext) => const _VoiceRecorderDialog(),
-    );
-    if (seconds != null && seconds > 0) {
-      final label = 'voice_note_${seconds}s.m4a';
-      ref.read(newRequestProvider.notifier).setVoiceNote(label);
+  /// The picker reports an extension, not a MIME type, and the backend
+  /// validates both — so the two have to agree.
+  static String _mimeForExtension(String? ext) {
+    switch ((ext ?? '').toLowerCase()) {
+      case 'pdf':
+        return 'application/pdf';
+      case 'png':
+        return 'image/png';
+      case 'webp':
+        return 'image/webp';
+      default:
+        return 'image/jpeg';
     }
   }
 }
@@ -562,7 +357,7 @@ class _Header extends StatelessWidget {
                       ),
                       const SizedBox(height: 2),
                       Text(
-                        'Step 1 of 1 · All details',
+                        'Choose your care and who it is for',
                         style: MtTextStyles.bodySm.copyWith(
                           color: c.muted,
                         ),
@@ -573,14 +368,11 @@ class _Header extends StatelessWidget {
               ],
             ),
           ),
-          Container(
-            height: 4,
-            color: c.cardBorder,
-            child: FractionallySizedBox(
-              alignment: Alignment.centerLeft,
-              widthFactor: 0.4,
-              child: Container(color: c.brand),
-            ),
+          // Step 1 of the checkout. Nothing behind it is tappable — the back
+          // arrow above is the only way out of the flow from here.
+          const Padding(
+            padding: EdgeInsets.fromLTRB(24, 0, 24, 14),
+            child: BookingStepper(current: BookingStep.service),
           ),
         ],
       ),
@@ -871,319 +663,33 @@ class _Radio extends StatelessWidget {
   }
 }
 
-class _LocationCard extends StatelessWidget {
-  final RequestAddress address;
-  final bool showLandmarkField;
-  final TextEditingController landmarkController;
-  final VoidCallback onEdit;
-  final VoidCallback onToggleLandmark;
-  final ValueChanged<String> onLandmarkChanged;
-
-  const _LocationCard({
-    required this.address,
-    required this.showLandmarkField,
-    required this.landmarkController,
-    required this.onEdit,
-    required this.onToggleLandmark,
-    required this.onLandmarkChanged,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final c = context.appColors;
-    // No saved address yet — prompt the patient to add one. Submission is
-    // blocked (see `_SubmitBar.enabled`) until a real address is chosen.
-    if (address.isEmpty) {
-      return Material(
-        color: Colors.transparent,
-        child: InkWell(
-          onTap: onEdit,
-          borderRadius: BorderRadius.circular(12),
-          child: Container(
-            padding: const EdgeInsets.all(14),
-            decoration: BoxDecoration(
-              color: c.surface,
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: c.brand, width: 1.2),
-            ),
-            child: Row(
-              children: [
-                Container(
-                  width: 36,
-                  height: 36,
-                  decoration: BoxDecoration(
-                    color: c.brand.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Icon(Icons.add_location_alt_outlined,
-                      color: c.brand, size: 20),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        'Add your address',
-                        style: MtTextStyles.labelLg.copyWith(color: c.title),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        'Choose where the medical team should visit',
-                        style: MtTextStyles.bodySm.copyWith(color: c.body),
-                      ),
-                    ],
-                  ),
-                ),
-                Icon(Icons.chevron_right, color: c.muted),
-              ],
-            ),
-          ),
-        ),
-      );
-    }
-
-    return Container(
-      decoration: BoxDecoration(
-        color: c.surface,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: c.cardBorder),
-      ),
-      child: Column(
-        children: [
-          Padding(
-            padding: const EdgeInsets.all(14),
-            child: Row(
-              children: [
-                Container(
-                  width: 36,
-                  height: 36,
-                  decoration: BoxDecoration(
-                    color: c.brand.withValues(alpha: 0.12),
-                    borderRadius: BorderRadius.circular(10),
-                  ),
-                  child: Icon(
-                    Icons.location_on,
-                    color: c.brand,
-                    size: 20,
-                  ),
-                ),
-                const SizedBox(width: 12),
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Text(
-                        address.line1,
-                        style: MtTextStyles.labelLg.copyWith(color: c.title),
-                      ),
-                      const SizedBox(height: 2),
-                      Text(
-                        '${address.areaCityZip} · ${address.label}',
-                        style: MtTextStyles.bodySm.copyWith(
-                          color: c.body,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-                IconButton(
-                  icon: Icon(Icons.edit, size: 18, color: c.muted),
-                  onPressed: onEdit,
-                  tooltip: 'Edit address',
-                ),
-              ],
-            ),
-          ),
-          Divider(height: 1, color: c.cardBorder),
-          if (!showLandmarkField)
-            InkWell(
-              onTap: onToggleLandmark,
-              borderRadius: const BorderRadius.only(
-                bottomLeft: Radius.circular(12),
-                bottomRight: Radius.circular(12),
-              ),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 14,
-                  vertical: 12,
-                ),
-                child: Row(
-                  children: [
-                    Icon(Icons.add, size: 18, color: c.body),
-                    const SizedBox(width: 6),
-                    Text(
-                      'Add landmark or unit number',
-                      style: MtTextStyles.bodyMd.copyWith(color: c.body),
-                    ),
-                  ],
-                ),
-              ),
-            )
-          else
-            Padding(
-              padding: const EdgeInsets.fromLTRB(14, 8, 14, 12),
-              child: Row(
-                children: [
-                  Icon(Icons.place_outlined, size: 18, color: c.body),
-                  const SizedBox(width: 8),
-                  Expanded(
-                    child: TextField(
-                      controller: landmarkController,
-                      onChanged: onLandmarkChanged,
-                      style: MtTextStyles.bodyMd.copyWith(color: c.title),
-                      decoration: const InputDecoration(
-                        isCollapsed: true,
-                        border: InputBorder.none,
-                        enabledBorder: InputBorder.none,
-                        focusedBorder: InputBorder.none,
-                        filled: false,
-                        contentPadding: EdgeInsets.symmetric(vertical: 8),
-                        hintText: 'Landmark, floor, or unit number',
-                      ),
-                    ),
-                  ),
-                  IconButton(
-                    onPressed: () {
-                      landmarkController.clear();
-                      onLandmarkChanged('');
-                      onToggleLandmark();
-                    },
-                    icon: Icon(Icons.close, size: 18, color: c.muted),
-                    tooltip: 'Remove landmark',
-                  ),
-                ],
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-class _WhenSelector extends StatelessWidget {
-  final RequestTiming timing;
-  final DateTime? scheduledAt;
-  final VoidCallback onAsap;
-  final VoidCallback onSchedule;
-
-  const _WhenSelector({
-    required this.timing,
-    required this.scheduledAt,
-    required this.onAsap,
-    required this.onSchedule,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final scheduledLabel = scheduledAt == null
-        ? 'Pick a date & time'
-        : DateFormat('EEE d MMM · h:mm a').format(scheduledAt ?? DateTime.now());
-    return Row(
-      children: [
-        Expanded(
-          child: _WhenCard(
-            title: 'As soon as possible',
-            subtitle: '~45 min dispatch',
-            selected: timing == RequestTiming.asSoonAsPossible,
-            onTap: onAsap,
-          ),
-        ),
-        const SizedBox(width: 10),
-        Expanded(
-          child: _WhenCard(
-            title: 'Schedule',
-            subtitle: scheduledLabel,
-            selected: timing == RequestTiming.scheduled,
-            onTap: onSchedule,
-          ),
-        ),
-      ],
-    );
-  }
-}
-
-class _WhenCard extends StatelessWidget {
-  final String title;
-  final String subtitle;
-  final bool selected;
-  final VoidCallback onTap;
-
-  const _WhenCard({
-    required this.title,
-    required this.subtitle,
-    required this.selected,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final c = context.appColors;
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(12),
-        child: Container(
-          padding: const EdgeInsets.all(12),
-          decoration: BoxDecoration(
-            color: selected ? c.brand.withValues(alpha: 0.08) : c.surface,
-            borderRadius: BorderRadius.circular(12),
-            border: Border.all(
-              color: selected ? c.brand : c.cardBorder,
-              width: selected ? 1.5 : 1,
-            ),
-          ),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text(
-                title,
-                style: MtTextStyles.labelLg.copyWith(color: c.title),
-              ),
-              const SizedBox(height: 4),
-              Text(
-                subtitle,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: MtTextStyles.bodySm.copyWith(color: c.body),
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
 
 class _NotesCard extends StatelessWidget {
   final TextEditingController controller;
-  final RequestAttachments attachments;
+
+  /// Documents already uploaded and attached to this request.
+  final List<RequestDocument> documents;
+
+  /// An upload is in flight — the attach row becomes a spinner.
+  final bool uploading;
+
   final ValueChanged<String> onNotesChanged;
-  final VoidCallback onAttachDischarge;
-  final VoidCallback onAttachVitals;
-  final VoidCallback onAttachVoice;
-  final VoidCallback onClearDischarge;
-  final VoidCallback onClearVitals;
-  final VoidCallback onClearVoice;
+  final VoidCallback onAttachDocument;
+  final ValueChanged<RequestDocument> onRemoveDocument;
 
   const _NotesCard({
     required this.controller,
-    required this.attachments,
+    required this.documents,
+    required this.uploading,
     required this.onNotesChanged,
-    required this.onAttachDischarge,
-    required this.onAttachVitals,
-    required this.onAttachVoice,
-    required this.onClearDischarge,
-    required this.onClearVitals,
-    required this.onClearVoice,
+    required this.onAttachDocument,
+    required this.onRemoveDocument,
   });
 
   @override
   Widget build(BuildContext context) {
     final c = context.appColors;
     return Container(
-      padding: const EdgeInsets.all(14),
       decoration: BoxDecoration(
         color: c.surface,
         borderRadius: BorderRadius.circular(12),
@@ -1192,49 +698,47 @@ class _NotesCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          TextField(
-            controller: controller,
-            onChanged: onNotesChanged,
-            maxLines: 4,
-            minLines: 2,
-            style: MtTextStyles.bodyMd.copyWith(color: c.title),
-            decoration: const InputDecoration(
-              isCollapsed: true,
-              border: InputBorder.none,
-              enabledBorder: InputBorder.none,
-              focusedBorder: InputBorder.none,
-              filled: false,
-              contentPadding: EdgeInsets.zero,
-              hintText: 'Add details for the medical team…',
+          Padding(
+            padding: const EdgeInsets.fromLTRB(14, 12, 14, 8),
+            child: TextField(
+              controller: controller,
+              onChanged: onNotesChanged,
+              maxLines: 5,
+              minLines: 3,
+              textCapitalization: TextCapitalization.sentences,
+              style: MtTextStyles.bodyMd.copyWith(color: c.title),
+              decoration: InputDecoration(
+                isCollapsed: true,
+                border: InputBorder.none,
+                enabledBorder: InputBorder.none,
+                focusedBorder: InputBorder.none,
+                filled: false,
+                hintText:
+                    'Describe symptoms, existing conditions, or anything the '
+                    'medical team should know before the visit.',
+                hintStyle: MtTextStyles.bodyMd.copyWith(color: c.muted),
+              ),
             ),
           ),
-          const SizedBox(height: 12),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              _AttachChip(
-                icon: Icons.description_outlined,
-                emptyLabel: 'Attach discharge',
-                value: attachments.discharge,
-                onTap: onAttachDischarge,
-                onClear: onClearDischarge,
+          Divider(height: 1, color: c.cardBorder),
+          // Attached documents list — one row per file, with a remove action.
+          if (documents.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(14, 10, 8, 2),
+              child: Column(
+                children: [
+                  for (final d in documents)
+                    _DocumentRow(
+                      document: d,
+                      onRemove: () => onRemoveDocument(d),
+                    ),
+                ],
               ),
-              _AttachChip(
-                icon: Icons.favorite_outline,
-                emptyLabel: 'Add vitals',
-                value: attachments.vitals,
-                onTap: onAttachVitals,
-                onClear: onClearVitals,
-              ),
-              _AttachChip(
-                icon: Icons.mic_none,
-                emptyLabel: 'Voice note',
-                value: attachments.voiceNote,
-                onTap: onAttachVoice,
-                onClear: onClearVoice,
-              ),
-            ],
+            ),
+          _AttachDocumentButton(
+            uploading: uploading,
+            onTap: onAttachDocument,
+            hasDocuments: documents.isNotEmpty,
           ),
         ],
       ),
@@ -1242,70 +746,123 @@ class _NotesCard extends StatelessWidget {
   }
 }
 
-class _AttachChip extends StatelessWidget {
-  final IconData icon;
-  final String emptyLabel;
-  final String? value;
+/// The single attachment affordance on the service step: pick a PDF or an
+/// image of a previous discharge summary / prescription / lab report.
+class _AttachDocumentButton extends StatelessWidget {
+  final bool uploading;
+  final bool hasDocuments;
   final VoidCallback onTap;
-  final VoidCallback onClear;
 
-  const _AttachChip({
-    required this.icon,
-    required this.emptyLabel,
-    required this.value,
+  const _AttachDocumentButton({
+    required this.uploading,
+    required this.hasDocuments,
     required this.onTap,
-    required this.onClear,
   });
 
   @override
   Widget build(BuildContext context) {
     final c = context.appColors;
-    final filled = value != null && value!.trim().isNotEmpty;
-    return Material(
-      color: Colors.transparent,
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(20),
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-          decoration: BoxDecoration(
-            color: filled ? c.brand : c.brand.withValues(alpha: 0.12),
-            borderRadius: BorderRadius.circular(20),
-          ),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                filled ? Icons.check_circle : icon,
-                size: 14,
-                color: filled ? c.onAccent : c.brand,
+    return InkWell(
+      onTap: uploading ? null : onTap,
+      borderRadius: const BorderRadius.vertical(bottom: Radius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(14, 12, 14, 12),
+        child: Row(
+          children: [
+            if (uploading)
+              SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  valueColor: AlwaysStoppedAnimation(c.brand),
+                ),
+              )
+            else
+              Text('📄', style: TextStyle(fontSize: 17, color: c.brand)),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    uploading
+                        ? 'Uploading…'
+                        : hasDocuments
+                            ? 'Attach another document'
+                            : 'Attach Previous Medical Documents',
+                    style: MtTextStyles.labelLg.copyWith(color: c.brand),
+                  ),
+                  if (!uploading && !hasDocuments) ...[
+                    const SizedBox(height: 2),
+                    Text(
+                      'Discharge summary, prescription or lab report · PDF or image',
+                      style: MtTextStyles.bodySm.copyWith(color: c.muted),
+                    ),
+                  ],
+                ],
               ),
-              const SizedBox(width: 6),
-              ConstrainedBox(
-                constraints: const BoxConstraints(maxWidth: 180),
-                child: Text(
-                  filled ? (value ?? '') : emptyLabel,
+            ),
+            if (!uploading) Icon(Icons.attach_file, size: 18, color: c.brand),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _DocumentRow extends StatelessWidget {
+  final RequestDocument document;
+  final VoidCallback onRemove;
+
+  const _DocumentRow({required this.document, required this.onRemove});
+
+  @override
+  Widget build(BuildContext context) {
+    final c = context.appColors;
+    final size = document.readableSize;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Row(
+        children: [
+          Container(
+            width: 34,
+            height: 34,
+            decoration: BoxDecoration(
+              color: c.surfaceHi,
+              borderRadius: BorderRadius.circular(8),
+            ),
+            child: Icon(
+              document.isPdf
+                  ? Icons.picture_as_pdf_outlined
+                  : Icons.image_outlined,
+              size: 18,
+              color: document.isPdf ? c.danger : c.brand,
+            ),
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  document.name,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
-                  style: MtTextStyles.labelSm.copyWith(
-                    color: filled ? c.onAccent : c.brand,
-                  ),
+                  style: MtTextStyles.labelMd.copyWith(color: c.title),
                 ),
-              ),
-              if (filled) ...[
-                const SizedBox(width: 6),
-                GestureDetector(
-                  onTap: onClear,
-                  child: Icon(
-                    Icons.close,
-                    size: 14,
-                    color: c.onAccent,
-                  ),
-                ),
+                if (size.isNotEmpty)
+                  Text(size,
+                      style: MtTextStyles.bodySm.copyWith(color: c.muted)),
               ],
-            ],
+            ),
           ),
-        ),
+          IconButton(
+            onPressed: onRemove,
+            icon: Icon(Icons.close, size: 18, color: c.muted),
+            tooltip: 'Remove ${document.name}',
+          ),
+        ],
       ),
     );
   }
@@ -1341,20 +898,20 @@ class _InlineError extends StatelessWidget {
   }
 }
 
+/// Step 1's bottom bar. Advances to the Care Summary — it does **not**
+/// submit, so there is no loading state to model here.
 class _SubmitBar extends StatelessWidget {
   final bool enabled;
 
-  /// Submission is barred specifically because another booking is still open
+  /// Progress is barred specifically because another booking is still open
   /// (as opposed to a merely incomplete form) — swaps the pricing note for
   /// the tappable active-booking banner.
   final bool blocked;
-  final bool isLoading;
   final VoidCallback onSubmit;
 
   const _SubmitBar({
     required this.enabled,
     required this.blocked,
-    required this.isLoading,
     required this.onSubmit,
   });
 
@@ -1372,10 +929,10 @@ class _SubmitBar extends StatelessWidget {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // Pricing is negotiated by the admin team after submission, so
-            // there's no patient-facing total here — just set expectations.
-            // While a booking is already open that note is moot; the reason
-            // the button is dead is the more useful thing to say.
+            // Next up is the cart, where the price is assembled — so the note
+            // here just says what happens next. While a booking is already
+            // open that note is moot; the reason the button is dead is the
+            // more useful thing to say.
             if (blocked)
               const ActiveBookingBanner()
             else
@@ -1385,7 +942,7 @@ class _SubmitBar extends StatelessWidget {
                   const SizedBox(width: 8),
                   Expanded(
                     child: Text(
-                      'Admin will contact you directly to finalize service payment terms.',
+                      'Next: review your care summary, add-ons and total.',
                       style: MtTextStyles.bodySm.copyWith(color: c.body),
                     ),
                   ),
@@ -1409,31 +966,14 @@ class _SubmitBar extends StatelessWidget {
                 child: Row(
                   mainAxisAlignment: MainAxisAlignment.center,
                   children: [
-                    if (isLoading) ...[
-                      SizedBox(
-                        width: 18,
-                        height: 18,
-                        child: CircularProgressIndicator(
-                          strokeWidth: 2,
-                          valueColor: AlwaysStoppedAnimation(c.onAccent),
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Text(
-                        'Submitting…',
-                        style: MtTextStyles.labelLg
-                            .copyWith(color: c.onAccent),
-                      ),
-                    ] else ...[
-                      const Icon(Icons.send, size: 18),
-                      const SizedBox(width: 8),
-                      Text(
-                        'Submit to Taafi admin',
-                        // No explicit color: inherits the button's foreground,
-                        // so the disabled state can dim the label too.
-                        style: MtTextStyles.labelLg,
-                      ),
-                    ],
+                    Text(
+                      'Continue to summary',
+                      // No explicit color: inherits the button's foreground,
+                      // so the disabled state can dim the label too.
+                      style: MtTextStyles.labelLg,
+                    ),
+                    const SizedBox(width: 8),
+                    const Icon(Icons.arrow_forward_rounded, size: 18),
                   ],
                 ),
               ),
@@ -1445,168 +985,6 @@ class _SubmitBar extends StatelessWidget {
   }
 }
 
-class _DialogField extends StatelessWidget {
-  final TextEditingController controller;
-  final String label;
-  final TextInputType keyboardType;
-  final List<TextInputFormatter>? inputFormatters;
-  final bool autofocus;
-
-  const _DialogField({
-    required this.controller,
-    required this.label,
-    this.keyboardType = TextInputType.text,
-    this.inputFormatters,
-    this.autofocus = false,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final c = context.appColors;
-    return TextField(
-      controller: controller,
-      keyboardType: keyboardType,
-      inputFormatters: inputFormatters,
-      autofocus: autofocus,
-      style: MtTextStyles.bodyMd.copyWith(color: c.title),
-      decoration: InputDecoration(
-        labelText: label,
-        labelStyle: MtTextStyles.bodySm.copyWith(color: c.muted),
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: BorderSide(color: c.cardBorder),
-        ),
-        enabledBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: BorderSide(color: c.cardBorder),
-        ),
-        focusedBorder: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(10),
-          borderSide: BorderSide(color: c.brand, width: 1.5),
-        ),
-        contentPadding: const EdgeInsets.symmetric(
-          horizontal: 12,
-          vertical: 14,
-        ),
-      ),
-    );
-  }
-}
-
-/// Simulated voice recorder dialog. Counts seconds while held; returns the
-/// elapsed seconds when the user taps Stop. Real audio capture is wired in a
-/// follow-up — this widget's contract (returns an `int`) doesn't change.
-class _VoiceRecorderDialog extends StatefulWidget {
-  const _VoiceRecorderDialog();
-
-  @override
-  State<_VoiceRecorderDialog> createState() => _VoiceRecorderDialogState();
-}
-
-class _VoiceRecorderDialogState extends State<_VoiceRecorderDialog> {
-  int _seconds = 0;
-  bool _recording = false;
-  Stream<int>? _ticker;
-  // ignore: cancel_subscriptions
-  // Use a periodic stream tied to a microtask cancellation flag.
-  bool _disposed = false;
-
-  void _toggleRecord() {
-    if (_recording) {
-      setState(() => _recording = false);
-      return;
-    }
-    setState(() {
-      _recording = true;
-      _seconds = 0;
-    });
-    _ticker = Stream.periodic(const Duration(seconds: 1), (i) => i + 1);
-    _ticker?.listen((v) {
-      if (_disposed || !_recording) return;
-      setState(() => _seconds = v);
-    });
-  }
-
-  @override
-  void dispose() {
-    _disposed = true;
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final c = context.appColors;
-    return AlertDialog(
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-      ),
-      title: Text('Voice note', style: MtTextStyles.h3),
-      content: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          GestureDetector(
-            onTap: _toggleRecord,
-            child: Container(
-              width: 88,
-              height: 88,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: _recording ? c.danger : c.brand,
-                boxShadow: [
-                  BoxShadow(
-                    color: (_recording ? c.danger : c.brand)
-                        .withValues(alpha: 0.30),
-                    blurRadius: 18,
-                    spreadRadius: 4,
-                  ),
-                ],
-              ),
-              child: Icon(
-                _recording ? Icons.stop : Icons.mic,
-                color: c.onAccent,
-                size: 40,
-              ),
-            ),
-          ),
-          const SizedBox(height: 16),
-          Text(
-            _seconds == 0
-                ? 'Tap to start recording'
-                : _formatSeconds(_seconds),
-            style: MtTextStyles.h3.copyWith(color: c.title),
-          ),
-          const SizedBox(height: 4),
-          Text(
-            _recording
-                ? 'Recording… tap to stop'
-                : 'Max 60 seconds. Doctors review before arrival.',
-            textAlign: TextAlign.center,
-            style: MtTextStyles.bodySm.copyWith(color: c.muted),
-          ),
-        ],
-      ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.of(context).pop(null),
-          child: Text('Cancel', style: MtTextStyles.labelMd),
-        ),
-        TextButton(
-          onPressed: _seconds > 0 && !_recording
-              ? () => Navigator.of(context).pop(_seconds)
-              : null,
-          style: TextButton.styleFrom(foregroundColor: c.brand),
-          child: Text('Save', style: MtTextStyles.labelMd),
-        ),
-      ],
-    );
-  }
-
-  String _formatSeconds(int s) {
-    final m = (s ~/ 60).toString().padLeft(2, '0');
-    final sec = (s % 60).toString().padLeft(2, '0');
-    return '$m:$sec';
-  }
-}
 
 /// Horizontal "Who is this for?" chips: `Myself` (default) followed by the
 /// patient's saved family members. Selecting a member binds their profile +

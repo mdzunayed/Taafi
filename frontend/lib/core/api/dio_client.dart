@@ -10,6 +10,7 @@ import '../models/admin_models.dart';
 import '../models/admin_patient_detail.dart';
 import '../models/admin_settings.dart';
 import '../models/appointment.dart';
+import '../models/booking_transaction.dart';
 import '../models/service.dart';
 import '../models/doctor_dashboard.dart';
 import '../models/doctor_patient.dart';
@@ -21,9 +22,11 @@ import '../models/patient_history_item.dart';
 import '../models/nurse_profile.dart';
 import '../models/provider_earnings.dart';
 import '../models/provider_wallet.dart';
+import '../models/request_document.dart';
 import '../models/saved_address.dart';
 import '../models/dependent.dart';
 import '../models/patient_medical_vault.dart';
+import '../models/platform_pricing.dart';
 import '../models/patient_profile.dart';
 import '../models/snake_case_json.dart';
 import '../models/patient_active_request.dart';
@@ -1282,6 +1285,50 @@ class DioClient {
     }
   }
 
+  /// `POST /patient/documents` (multipart, field `file`) — uploads one
+  /// previous medical document (PDF or image) the patient attached on the
+  /// service step, and returns its descriptor.
+  ///
+  /// Booking-independent by design: the patient attaches before the booking
+  /// exists (it is created at checkout), so the returned [RequestDocument]
+  /// rides along in the create payload's `documents` array.
+  Future<RequestDocument> uploadPatientDocument({
+    required Uint8List bytes,
+    required String filename,
+    required String mimeType,
+  }) async {
+    if (_useMockMode) {
+      await Future.delayed(const Duration(milliseconds: 500));
+      return RequestDocument(
+        name: filename,
+        url: 'https://placehold.co/600x800?text=Doc',
+        mime: mimeType,
+        size: bytes.length,
+      );
+    }
+    try {
+      final form = FormData.fromMap({
+        'file': MultipartFile.fromBytes(
+          bytes,
+          filename: filename,
+          contentType: DioMediaType.parse(mimeType),
+        ),
+      });
+      final res = await _dio.post<Map<String, dynamic>>(
+        '/patient/documents',
+        data: form,
+      );
+      final data = res.data ?? const <String, dynamic>{};
+      final doc = RequestDocument.fromJson(Map<String, dynamic>.from(data));
+      if (doc.url.isEmpty) {
+        throw Exception('Upload succeeded but no file url was returned.');
+      }
+      return doc;
+    } on DioException catch (e) {
+      throw _handleError(e);
+    }
+  }
+
   Future<dynamic> createRequest(Map<String, dynamic> requestData) async {
     if (_useMockMode) {
       await Future.delayed(const Duration(milliseconds: 700));
@@ -1470,7 +1517,7 @@ class DioClient {
       await Future.delayed(const Duration(milliseconds: 300));
       return {
         'simulated': true,
-        'amount': 100,
+        'amount': kDefaultBookingDeposit,
         'tranId': 'MOCK-DEP-${DateTime.now().millisecondsSinceEpoch}',
         'gatewayUrl': null,
       };
@@ -1570,10 +1617,127 @@ class DioClient {
     }
   }
 
-  /// Admin pricing gateway. Assigns the base service fee (and an optional
-  /// discount / call note) to a booking under review. A SILENT invoice
-  /// update — the status does not change and the patient is not prompted
-  /// to pay; the balance becomes payable only after the service completes.
+  /// PHASE 2 — `PATCH /api/admin/bookings/:id/set-deposit`.
+  ///
+  /// The review-call write: after phoning the patient, the admin commits BOTH
+  /// the total service fee and the deposit this specific booking must pay.
+  /// The backend derives the remaining balance, moves the booking to
+  /// `deposit_required`, and notifies the patient to pay.
+  ///
+  /// Distinct from [adminSetBookingPrice], which corrects a fee WITHOUT
+  /// touching the deposit or prompting for payment. Use this one to price a
+  /// booking for the first time; use that one to fix a number afterwards.
+  Future<Map<String, dynamic>> adminSetBookingDeposit(
+    String requestId, {
+    required double totalServiceFee,
+    required double requiredDeposit,
+    double adjustedDiscount = 0,
+    String? adminNote,
+  }) async {
+    if (_useMockMode) {
+      await Future.delayed(const Duration(milliseconds: 400));
+      return {
+        'id': requestId,
+        'status': 'deposit_required',
+        'total_service_fee': totalServiceFee,
+        'final_price': totalServiceFee,
+        'required_deposit': requiredDeposit,
+        'deposit_required_amount': requiredDeposit,
+        'adjusted_discount': adjustedDiscount,
+        'remaining_balance':
+            totalServiceFee - requiredDeposit - adjustedDiscount,
+        'deposit_status': 'PENDING',
+      };
+    }
+    try {
+      final res = await _dio.patch<Map<String, dynamic>>(
+        '/admin/bookings/$requestId/set-deposit',
+        data: {
+          'total_service_fee': totalServiceFee,
+          'required_deposit': requiredDeposit,
+          'adjusted_discount': adjustedDiscount,
+          'admin_note': ?adminNote,
+        },
+      );
+      return res.data ?? const <String, dynamic>{};
+    } on DioException catch (e) {
+      throw _handleError(e);
+    }
+  }
+
+  /// PHASE 4, CHANNEL B — `POST /api/admin/bookings/:id/verify-payment`.
+  ///
+  /// The admin confirms they have reconciled the patient's ONLINE balance
+  /// payment against the gateway, which flips `remaining_payment_status` to
+  /// VERIFIED and unlocks the visit's prescription in the same write.
+  ///
+  /// Cash never comes through here — the attending clinician's confirmation
+  /// already verified it (see [confirmCashReceived]).
+  Future<Map<String, dynamic>> adminVerifyBookingPayment(
+    String bookingId, {
+    String? reference,
+    String? note,
+  }) async {
+    if (_useMockMode) {
+      await Future.delayed(const Duration(milliseconds: 400));
+      return {
+        'success': true,
+        'booking': {
+          'id': bookingId,
+          'remaining_payment_status': 'VERIFIED',
+          'prescription_unlocked': true,
+        },
+      };
+    }
+    try {
+      final res = await _dio.post<Map<String, dynamic>>(
+        '/admin/bookings/$bookingId/verify-payment',
+        data: {'reference': ?reference, 'note': ?note},
+      );
+      return res.data ?? const <String, dynamic>{};
+    } on DioException catch (e) {
+      throw _handleError(e);
+    }
+  }
+
+  /// `GET /api/admin/bookings/pending-verification` — the Finance & Billing
+  /// queue: bookings whose balance arrived online and is waiting on an admin
+  /// to reconcile it. Oldest payment first, so the patient who has been locked
+  /// out of their prescription longest is at the top.
+  Future<List<BookingTransaction>> adminGetBookingsPendingVerification() async {
+    if (_useMockMode) {
+      await Future.delayed(const Duration(milliseconds: 300));
+      return const <BookingTransaction>[];
+    }
+    try {
+      final res = await _dio.get<Map<String, dynamic>>(
+        '/admin/bookings/pending-verification',
+      );
+      final raw = (res.data ?? const <String, dynamic>{})['bookings'];
+      if (raw is! List) return const [];
+      final out = <BookingTransaction>[];
+      for (final row in raw) {
+        if (row is Map) {
+          try {
+            out.add(
+              BookingTransaction.fromMongo(Map<String, dynamic>.from(row)),
+            );
+          } catch (_) {
+            // skip malformed row
+          }
+        }
+      }
+      return out;
+    } on DioException catch (e) {
+      throw _handleError(e);
+    }
+  }
+
+  /// Admin pricing gateway. Corrects the base service fee (and an optional
+  /// discount / call note) on a booking that has already been through the
+  /// review call. A SILENT invoice update — the status does not change, the
+  /// deposit is left exactly as quoted, and the patient is not prompted to
+  /// pay. To price a booking for the FIRST time, use [adminSetBookingDeposit].
   Future<Map<String, dynamic>> adminSetBookingPrice(
     String requestId, {
     required double finalServiceFee,
@@ -1664,6 +1828,35 @@ class DioClient {
         return Prescription.fromJson(Map<String, dynamic>.from(raw));
       }
       return Prescription.fromJson(body);
+    } on DioException catch (e) {
+      throw _handleError(e);
+    }
+  }
+
+  /// `PATCH /admin/requests/:id/release-prescription` — "Verify Online
+  /// Payment & Release Prescription", the booking-level release for an
+  /// online payment the platform couldn't confirm on its own.
+  ///
+  /// Distinct from [adminSetPrescriptionApproval], which decides a single
+  /// script that already reached PAID through the gateway. This one settles
+  /// the booking's outstanding balance *and* releases every script on it,
+  /// because a booking the patient never paid through the gateway can never
+  /// reach the review queue in the first place.
+  ///
+  /// Returns the released scripts. Throws with the server's message on 409
+  /// (already released) / 404 (nothing to release).
+  Future<List<Prescription>> adminReleasePrescriptionForBooking(
+    String requestId,
+  ) async {
+    try {
+      final res = await _dio.patch<Map<String, dynamic>>(
+        '/admin/requests/$requestId/release-prescription',
+      );
+      final raw = (res.data ?? const <String, dynamic>{})['prescriptions'];
+      if (raw is! List) return const [];
+      return raw
+          .map((e) => Prescription.fromJson(Map<String, dynamic>.from(e as Map)))
+          .toList(growable: false);
     } on DioException catch (e) {
       throw _handleError(e);
     }
@@ -2794,22 +2987,106 @@ class DioClient {
     }
   }
 
-  /// `POST /api/appointments/:id/collect-cash` — the assigned provider
-  /// confirms receiving the outstanding balance in physical cash. The
-  /// backend computes the amount server-side, closes the booking, flips
-  /// the visit's prescriptions to PAID (admin release queue), and $incs
-  /// the collector's `financial_ledger.cash_in_hand`. Response:
-  /// `{success, amount, cashInHand, appointment}`.
-  Future<Map<String, dynamic>> collectCashPayment(String appointmentId) async {
+  /// PHASE 4, CHANNEL A — `POST /api/clinician/bookings/:id/confirm-cash`.
+  ///
+  /// The assigned clinician confirms receiving the remaining balance in
+  /// physical cash at the door. The backend computes the amount server-side
+  /// (the collector confirms what the invoice says, they don't declare it),
+  /// closes the booking, credits the collector's
+  /// `financial_ledger.cash_in_hand`, and — because the clinician is holding
+  /// the money, so there is nothing left for an admin to verify — marks the
+  /// balance VERIFIED and UNLOCKS the patient's prescription instantly.
+  ///
+  /// Response: `{success, amount, cashInHand, appointment}`.
+  Future<Map<String, dynamic>> confirmCashReceived(String bookingId) async {
     if (_useMockMode) {
       await Future.delayed(const Duration(milliseconds: 300));
-      return {'success': true, 'amount': 0, 'cashInHand': 0};
+      return {
+        'success': true,
+        'amount': 0,
+        'cashInHand': 0,
+        'appointment': {
+          'id': bookingId,
+          'remaining_payment_status': 'VERIFIED',
+          'prescription_unlocked': true,
+        },
+      };
     }
     try {
       final res = await _dio.post<Map<String, dynamic>>(
-        '/api/appointments/$appointmentId/collect-cash',
+        '/api/clinician/bookings/$bookingId/confirm-cash',
       );
       return res.data ?? const <String, dynamic>{};
+    } on DioException catch (e) {
+      throw _handleError(e);
+    }
+  }
+
+  /// The appointment-vocabulary alias for [confirmCashReceived]. Same server
+  /// handler, same effects — kept so existing provider surfaces that speak
+  /// "appointment" rather than "booking" keep compiling.
+  Future<Map<String, dynamic>> collectCashPayment(String appointmentId) =>
+      confirmCashReceived(appointmentId);
+
+  /// `GET /doctor/bookings/:id` — authoritative booking detail for the
+  /// assigned clinician, always carrying the live payment block
+  /// (`payment_channel`, `payment_status`, `remaining_balance`,
+  /// `cash_collection_required`) and the patient's `attachments` (previous
+  /// medical records, as presigned expiring URLs). This is the console's
+  /// `fetchBookingDetails()`: it re-reads the booking after a
+  /// `booking:payment_updated` event (and on resume, when the app may have
+  /// slept through one) so the payment card and the Collect Cash gate render
+  /// from the server's answer rather than the document the screen launched
+  /// with. 403 when the caller isn't this visit's doctor or nurse.
+  Future<Map<String, dynamic>> getProviderBookingDetails(
+    String bookingId,
+  ) async {
+    if (_useMockMode) {
+      await Future.delayed(const Duration(milliseconds: 200));
+      return {'id': bookingId};
+    }
+    try {
+      final res =
+          await _dio.get<Map<String, dynamic>>('/doctor/bookings/$bookingId');
+      return res.data ?? const <String, dynamic>{};
+    } on DioException catch (e) {
+      throw _handleError(e);
+    }
+  }
+
+  /// Fetch the raw bytes of one patient medical document.
+  ///
+  /// [absoluteUrl] is a presigned grant straight off a booking payload's
+  /// `attachments[].file_url` — it already names the full origin, so it is
+  /// passed to Dio verbatim rather than joined onto [baseUrl]. The grant is
+  /// the credential; the bearer this client injects is ignored by the
+  /// delivery route.
+  ///
+  /// Exists because `flutter_pdfview` renders from a local file path, not a
+  /// URL, so the PDF viewer has to stage the bytes on disk first. Images never
+  /// come through here — `Image.network` streams them.
+  ///
+  /// Returns null on an expired/invalid grant (403), which the viewer renders
+  /// as its own "reopen the visit" state rather than a generic error; anything
+  /// else throws through [_handleError] like every other call.
+  Future<List<int>?> fetchDocumentBytes(String absoluteUrl) async {
+    if (_useMockMode) {
+      await Future.delayed(const Duration(milliseconds: 200));
+      return const <int>[];
+    }
+    try {
+      final res = await _dio.get<List<int>>(
+        absoluteUrl,
+        options: Options(
+          responseType: ResponseType.bytes,
+          // 403 is an expected, actionable outcome here, not an exception —
+          // let it fall through to the null return below.
+          validateStatus: (s) => s != null && (s == 200 || s == 403),
+          receiveTimeout: const Duration(seconds: 60),
+        ),
+      );
+      if (res.statusCode == 403) return null;
+      return res.data;
     } on DioException catch (e) {
       throw _handleError(e);
     }
@@ -4048,6 +4325,41 @@ class DioClient {
     }
   }
 
+  /// `PATCH /api/admin/providers/:id/status` — suspend or reinstate a
+  /// provider account. Independent of verification: a suspended provider
+  /// keeps their verified badge and credentials, they are simply withheld
+  /// from dispatch until reinstated. [suspended] is sent explicitly rather
+  /// than toggled server-side so a stale table row can't flip the wrong way.
+  Future<DoctorProfile> setProviderStatus(
+    String providerId, {
+    required bool suspended,
+  }) async {
+    final next = suspended ? 'suspended' : 'active';
+    if (_useMockMode) {
+      await Future.delayed(const Duration(milliseconds: 200));
+      final list = await getAdminProviders();
+      final match = list.where((p) => p.id == providerId);
+      final base = match.isEmpty ? null : match.first;
+      return (base ??
+              const DoctorProfile(id: '', fullName: '', email: '', phone: ''))
+          .copyWith(status: next);
+    }
+    try {
+      final res = await _dio.patch<Map<String, dynamic>>(
+        '/api/admin/providers/$providerId/status',
+        data: {'status': next},
+      );
+      final body = res.data ?? const <String, dynamic>{};
+      final raw = body['provider'];
+      if (raw is Map) {
+        return DoctorProfile.fromJson(Map<String, dynamic>.from(raw));
+      }
+      return DoctorProfile.fromJson(body);
+    } on DioException catch (e) {
+      throw _handleError(e);
+    }
+  }
+
   /// `POST /api/admin/register-sub-admin` — root-admin-only creation of a
   /// secondary admin account. Throws on any non-2xx so the form surfaces
   /// the server's validation/conflict message.
@@ -4235,6 +4547,24 @@ class DioClient {
       return PayoutRequestModel.fromJson(
         raw is Map ? Map<String, dynamic>.from(raw) : const {},
       );
+    } on DioException catch (e) {
+      throw _handleError(e);
+    }
+  }
+
+  /// `GET /api/config/pricing` — public platform pricing (the booking deposit).
+  ///
+  /// Unauthenticated on the server, so this works before login. Never throws a
+  /// user-facing error: the caller falls back to its last known-good value, and
+  /// the amount is re-resolved server-side at payment time regardless.
+  Future<PlatformPricing> getPlatformPricing() async {
+    if (_useMockMode) {
+      await Future.delayed(const Duration(milliseconds: 150));
+      return PlatformPricing.fallback;
+    }
+    try {
+      final res = await _dio.get<Map<String, dynamic>>('/api/config/pricing');
+      return PlatformPricing.fromJson(res.data ?? const {});
     } on DioException catch (e) {
       throw _handleError(e);
     }

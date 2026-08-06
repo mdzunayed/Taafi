@@ -4,7 +4,6 @@ import 'package:intl/intl.dart';
 
 import '../../../core/api/patient_home_repository.dart';
 import '../../../core/models/patient_notification.dart';
-import '../../../core/models/patient_request_status.dart';
 import '../../../core/models/recent_provider.dart';
 import '../../../core/theme/mt_colors.dart';
 import '../../../core/theme/mt_text_styles.dart';
@@ -229,7 +228,6 @@ class _NotificationTile extends ConsumerWidget {
     // owns the Navigator we want to push the profile screen onto. The
     // sheet itself will be popped first.
     final outerContext = Navigator.of(context).context;
-    final activeRequest = ref.read(patientActiveRequestProvider);
 
     void Function()? destinationJump;
     RecentProvider? providerToOpen;
@@ -237,28 +235,13 @@ class _NotificationTile extends ConsumerWidget {
 
     switch (notification.kind) {
       case PatientNotificationKind.request:
-        final requestId = notification.payload?['requestId']?.toString();
-        if (requestId != null &&
-            activeRequest != null &&
-            activeRequest.id == requestId) {
-          switch (activeRequest.status.homeRouteTarget) {
-            case HomeRouteTarget.underReview:
-              destinationJump = () =>
-                  ref.goToActivities(sub: PatientActivitiesTab.underReview);
-              break;
-            case HomeRouteTarget.tracking:
-              destinationJump = () =>
-                  ref.goToActivities(sub: PatientActivitiesTab.tracking);
-              break;
-            case HomeRouteTarget.none:
-              destinationJump = () =>
-                  ref.goToActivities(sub: PatientActivitiesTab.underReview);
-              break;
-          }
-        } else {
-          destinationJump = () =>
-              ref.goToActivities(sub: PatientActivitiesTab.underReview);
-        }
+        // Every booking notification lands on Active Care now. The status→tab
+        // fork this used to run existed only to pick between the review and
+        // tracking surfaces; one screen renders the whole lifecycle, so there
+        // is nothing left to choose — and no way for the mapping to send a
+        // patient to the tab that can't show their booking.
+        destinationJump =
+            () => ref.goToActivities(sub: PatientActivitiesTab.activeCare);
         break;
       case PatientNotificationKind.provider:
         final providerId = notification.payload?['providerId']?.toString();

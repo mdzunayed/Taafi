@@ -74,6 +74,12 @@ class DoctorProfile extends Equatable {
   /// managed enum) so the UI doesn't need to know about that vocab.
   final bool isVerifiedDoctor;
 
+  /// `active` | `suspended`. Admin-managed account gate, orthogonal to
+  /// [verificationStatus]: a fully verified provider can still be suspended
+  /// (and stays suspended after re-verification). Drives the Providers
+  /// directory's "Suspended" pill and blocks dispatch assignment.
+  final String status;
+
   final DateTime? createdAt;
 
   const DoctorProfile({
@@ -98,11 +104,13 @@ class DoctorProfile extends Equatable {
     this.bmdcLicense = '',
     this.nursingLicense = '',
     this.isVerifiedDoctor = false,
+    this.status = 'active',
     this.createdAt,
   });
 
   bool get isVerified => verificationStatus == 'verified';
   bool get isOnline => availabilityStatus == 'online';
+  bool get isSuspended => status == 'suspended';
 
   DoctorProfile copyWith({
     String? fullName,
@@ -123,6 +131,7 @@ class DoctorProfile extends Equatable {
     String? degrees,
     String? bmdcLicense,
     bool? isVerifiedDoctor,
+    String? status,
   }) {
     return DoctorProfile(
       id: id,
@@ -146,6 +155,7 @@ class DoctorProfile extends Equatable {
       bmdcLicense: bmdcLicense ?? this.bmdcLicense,
       nursingLicense: nursingLicense,
       isVerifiedDoctor: isVerifiedDoctor ?? this.isVerifiedDoctor,
+      status: status ?? this.status,
       createdAt: createdAt,
     );
   }
@@ -173,6 +183,7 @@ class DoctorProfile extends Equatable {
         bmdcLicense,
         nursingLicense,
         isVerifiedDoctor,
+        status,
         createdAt,
       ];
 
@@ -210,6 +221,9 @@ class DoctorProfile extends Equatable {
       isVerifiedDoctor: (json['is_verified_doctor'] as bool?) ??
           (json['isVerifiedDoctor'] as bool?) ??
           ((json['verification_status'] ?? '').toString() == 'verified'),
+      // Rows written before the suspend gate existed carry no `status`,
+      // and an absent gate means "not suspended".
+      status: (json['status'] ?? 'active').toString(),
       createdAt: DateTime.tryParse(
         (json['created_at'] ?? json['createdAt'] ?? '').toString(),
       ),

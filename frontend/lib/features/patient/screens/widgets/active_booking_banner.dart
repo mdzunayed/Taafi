@@ -3,8 +3,6 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../../core/api/patient_home_repository.dart';
-import '../../../../core/models/patient_active_request.dart';
-import '../../../../core/models/patient_request_status.dart';
 import '../../../../core/theme/app_colors_ext.dart';
 import '../../../../core/theme/mt_text_styles.dart';
 import '../../navigation/patient_nav_provider.dart';
@@ -39,7 +37,7 @@ class ActiveBookingBanner extends ConsumerWidget {
         onTap: () {
           HapticFeedback.lightImpact();
           onBeforeNavigate?.call();
-          ref.goToActivities(sub: _tabFor(active));
+          ref.goToActivities(sub: PatientActivitiesTab.activeCare);
         },
         child: Ink(
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
@@ -68,16 +66,4 @@ class ActiveBookingBanner extends ConsumerWidget {
     );
   }
 
-  /// Land on the sub-tab that can actually show this booking. A request the
-  /// admin hasn't dispatched yet has no tracker to render, so it routes to
-  /// "Under Review" — same mapping the notification deep-links use.
-  static PatientActivitiesTab _tabFor(PatientActiveRequest request) {
-    switch (request.status.homeRouteTarget) {
-      case HomeRouteTarget.tracking:
-        return PatientActivitiesTab.tracking;
-      case HomeRouteTarget.underReview:
-      case HomeRouteTarget.none:
-        return PatientActivitiesTab.underReview;
-    }
-  }
 }

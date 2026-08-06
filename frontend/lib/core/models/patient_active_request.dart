@@ -4,11 +4,13 @@ import 'assigned_doctor.dart';
 import 'assigned_nurse.dart';
 import 'assigned_provider.dart';
 import 'booking_milestone.dart';
+import 'deposit_status.dart';
 import 'patient_request_status.dart';
+import 'platform_pricing.dart' show resolveDepositRequired;
 import 'provider_type.dart';
 
 /// The patient's currently-open service request. Drives both the Home active
-/// card and the Under Review / Tracking tabs.
+/// card and the Under Review / Service Status tabs.
 ///
 /// Optional fields (`requestedAt`, `acceptedAt`, `offer`, `durationHours`,
 /// `reviewEtaMinutes`) are populated on submit and as the backend updates the
@@ -25,7 +27,7 @@ class PatientActiveRequest extends Equatable {
 
   /// Populated doctor profile attached by the backend once the admin
   /// completes the assignment. `null` while the request is still pending.
-  /// Drives the "Your Doctor is Assigned" card on the Tracking tab and
+  /// Drives the assigned-provider card on the Service Status tab and
   /// the read-only `view_assigned_doctor_screen.dart`.
   final AssignedDoctor? assignedDoctor;
 
@@ -57,16 +59,53 @@ class PatientActiveRequest extends Equatable {
   /// can branch precisely. Empty for legacy payloads.
   final String rawStatus;
 
+  /// Whether the confirmation deposit has actually been settled.
+  /// Server-derived; the ONLY thing that may unlock "deposit confirmed" copy.
+  final DepositStatus depositStatus;
+
   /// Two-phase confirmation deposit + dynamic-invoice fields. Populated once
   /// the deposit is paid / the admin prices the booking; null/0 before then.
   final double depositAmount;
+
+  /// THE deposit figure to display for this booking, in any state: what was
+  /// paid if it is paid, what the admin set if it is not — and `null` when no
+  /// deposit has been set at all, which is the whole of Phase 1.
+  ///
+  /// Distinct from [depositAmount], which is 0 until the gateway settles — so
+  /// every "Pay ৳X" / "Deposit ৳X pending" string must read *this*. Also
+  /// distinct from the platform's default deposit: the amount is a per-case
+  /// decision made on the review call, so the server resolves it per booking
+  /// and the client never recomputes or substitutes it.
+  final double? depositRequiredAmount;
+
+  /// The total service fee the admin committed on the review call, or null
+  /// before it. Spec name: `total_service_fee`.
   final double? finalServiceFee;
   final double? adjustedDiscount;
+
+  /// Phase 4 verification state of the remaining balance:
+  /// `PENDING` / `PENDING_ADMIN_VERIFICATION` / `VERIFIED`. Says whether a
+  /// human has confirmed the money, which [balanceSettled] does not.
+  final String remainingPaymentStatus;
+
+  /// Whether this visit's prescription has been released — the server-held
+  /// latch that flips only alongside a VERIFIED balance.
+  final bool prescriptionUnlocked;
 
   /// The patient's upfront choice of how they'll settle the outstanding
   /// balance: `'CASH_ON_SERVICE'` (pay the provider in cash at the door) or
   /// `'DIGITAL'`. `null` until the patient picks one on the Tracking screen.
   final String? paymentPreference;
+
+  /// Whether the outstanding balance itself has been settled — server-derived
+  /// (`payment_status`), so it is true whether the money arrived through the
+  /// gateway or as cash the provider confirmed.
+  ///
+  /// Distinct from [paymentPreference], which is only an intention. This is
+  /// what the ledger's "Fully Settled" state branches on: a patient who
+  /// pre-committed to cash and then paid online must see the green banner,
+  /// not a cash-at-the-door instruction.
+  final bool balanceSettled;
 
   /// Patient's phone (surfaced so the admin review portal can call/text).
   final String? patientPhone;
@@ -131,10 +170,15 @@ class PatientActiveRequest extends Equatable {
     this.durationHours,
     this.offer,
     this.rawStatus = '',
+    this.depositStatus = DepositStatus.notRequired,
     this.depositAmount = 0,
+    this.depositRequiredAmount,
     this.finalServiceFee,
     this.adjustedDiscount,
     this.paymentPreference,
+    this.balanceSettled = false,
+    this.remainingPaymentStatus = 'PENDING',
+    this.prescriptionUnlocked = false,
     this.patientPhone,
     this.milestone = BookingMilestone.requested,
     this.milestoneLabel = '',
@@ -192,17 +236,46 @@ class PatientActiveRequest extends Equatable {
     return assignedNurse?.fullName;
   }
 
-  /// True once the patient has committed to paying in cash at the door.
-  bool get isCashChosen => paymentPreference == 'CASH_ON_SERVICE';
+  /// True once the patient has committed to paying in cash at the door AND
+  /// that is still how the money will arrive. A settled balance overrides the
+  /// stated preference — nothing is left to hand over.
+  bool get isCashChosen =>
+      paymentPreference == 'CASH_ON_SERVICE' && !balanceSettled;
+
+  /// PHASE 1 — placed free, waiting on the care team's review call. Nothing is
+  /// owed; no payment CTA may render.
+  bool get isAwaitingReviewCall => depositStatus.isAwaitingReview;
+
+  /// PHASE 2 — the admin set an amount and the patient owes it. Gates the
+  /// "Pay ৳X Deposit to Confirm Booking" card.
+  bool get needsDeposit => depositStatus.isOutstanding;
+
+  /// The deposit to name in copy, or 0 when none has been set. Gate on
+  /// [needsDeposit] before rendering it as a price.
+  double get depositDue => depositRequiredAmount ?? 0;
+
+  /// PHASE 4, CHANNEL B — paid online, not yet reconciled by an admin. Why a
+  /// paid-for prescription can still be locked.
+  bool get isAwaitingPaymentVerification =>
+      remainingPaymentStatus == 'PENDING_ADMIN_VERIFICATION';
 
   /// Outstanding balance the patient still owes after the admin prices the
-  /// booking: base fee − deposit − discount. Never negative.
+  /// booking: base fee − deposit − discount. Never negative, and always 0 once
+  /// the balance has been settled through either channel.
   double get outstandingBalance {
+    if (balanceSettled) return 0;
     final fee = finalServiceFee ?? 0;
     final discount = adjustedDiscount ?? 0;
     final owed = fee - depositAmount - discount;
     return owed < 0 ? 0 : owed;
   }
+
+  /// Everything is priced and paid — the spec's STATE C. What the clinician
+  /// sees as "৳0 to collect".
+  bool get isFullySettled => balanceSettled && (finalServiceFee ?? 0) > 0;
+
+  /// Total the patient has paid once fully settled, for the receipt line.
+  double get totalPaid => (finalServiceFee ?? 0) - (adjustedDiscount ?? 0);
 
   PatientActiveRequest copyWith({
     PatientRequestStatus? status,
@@ -213,6 +286,9 @@ class PatientActiveRequest extends Equatable {
     AssignedDoctor? assignedDoctor,
     AssignedNurse? assignedNurse,
     String? paymentPreference,
+    bool? balanceSettled,
+    String? remainingPaymentStatus,
+    bool? prescriptionUnlocked,
     BookingMilestone? milestone,
     String? milestoneLabel,
     DateTime? scheduledTime,
@@ -243,10 +319,16 @@ class PatientActiveRequest extends Equatable {
       durationHours: durationHours,
       offer: offer,
       rawStatus: rawStatus,
+      depositStatus: depositStatus,
       depositAmount: depositAmount,
+      depositRequiredAmount: depositRequiredAmount,
       finalServiceFee: finalServiceFee,
       adjustedDiscount: adjustedDiscount,
       paymentPreference: paymentPreference ?? this.paymentPreference,
+      balanceSettled: balanceSettled ?? this.balanceSettled,
+      remainingPaymentStatus:
+          remainingPaymentStatus ?? this.remainingPaymentStatus,
+      prescriptionUnlocked: prescriptionUnlocked ?? this.prescriptionUnlocked,
       patientPhone: patientPhone,
       milestone: milestone ?? this.milestone,
       milestoneLabel: milestoneLabel ?? this.milestoneLabel,
@@ -280,10 +362,15 @@ class PatientActiveRequest extends Equatable {
         durationHours,
         offer,
         rawStatus,
+        depositStatus,
         depositAmount,
+        depositRequiredAmount,
         finalServiceFee,
         adjustedDiscount,
         paymentPreference,
+        balanceSettled,
+        remainingPaymentStatus,
+        prescriptionUnlocked,
         patientPhone,
         milestone,
         milestoneLabel,
@@ -323,10 +410,42 @@ class PatientActiveRequest extends Equatable {
       durationHours: (json['durationHours'] as num?)?.toInt(),
       offer: (json['offer'] as num?)?.toInt(),
       rawStatus: json['rawStatus']?.toString() ?? '',
+      depositStatus: DepositStatusX.fromWire(
+        json['depositStatus']?.toString(),
+        // Pre-`depositStatus` payload: infer from the money. A paid amount is
+        // CONFIRMED; an amount that was set but not paid is PENDING; nothing
+        // set at all is NOT_REQUIRED, which keeps the payment CTA off a
+        // free Phase-1 request.
+        fallback: ((json['depositAmount'] as num?)?.toDouble() ?? 0) > 0
+            ? DepositStatus.confirmed
+            : (((json['requiredDeposit'] ?? json['depositRequiredAmount'])
+                            as num?)
+                        ?.toDouble() ??
+                    0) >
+                    0
+                ? DepositStatus.pending
+                : DepositStatus.notRequired,
+      ),
       depositAmount: (json['depositAmount'] as num?)?.toDouble() ?? 0,
-      finalServiceFee: (json['finalServiceFee'] as num?)?.toDouble(),
+      // Null when no deposit has been set — never substituted with a platform
+      // default, which would put a price on a free request.
+      depositRequiredAmount: resolveDepositRequired(
+        json['requiredDeposit'] ?? json['depositRequiredAmount'],
+        json['depositAmount'],
+      ),
+      finalServiceFee: (json['totalServiceFee'] as num?)?.toDouble() ??
+          (json['finalServiceFee'] as num?)?.toDouble(),
       adjustedDiscount: (json['adjustedDiscount'] as num?)?.toDouble(),
       paymentPreference: json['paymentPreference']?.toString(),
+      remainingPaymentStatus:
+          json['remainingPaymentStatus']?.toString() ?? 'PENDING',
+      prescriptionUnlocked: json['prescriptionUnlocked'] == true,
+      // Server-derived posture first; fall back to the settlement stamps for
+      // payloads that predate it, so a cached row degrades to "still owed"
+      // rather than falsely claiming the booking is paid.
+      balanceSettled: json['balanceSettled'] == true ||
+          json['paymentStatus']?.toString().toUpperCase() == 'PAID' ||
+          json['finalPaidAt'] != null,
       patientPhone: json['patientPhone']?.toString(),
       milestone: BookingMilestoneX.fromWire(json['milestone']?.toString()),
       milestoneLabel: json['milestoneLabel']?.toString() ?? '',
@@ -365,10 +484,15 @@ class PatientActiveRequest extends Equatable {
         'durationHours': durationHours,
         'offer': offer,
         'rawStatus': rawStatus,
+        'depositStatus': depositStatus.toWire(),
         'depositAmount': depositAmount,
+        'depositRequiredAmount': depositRequiredAmount,
         'finalServiceFee': finalServiceFee,
         'adjustedDiscount': adjustedDiscount,
         'paymentPreference': paymentPreference,
+        'balanceSettled': balanceSettled,
+        'remainingPaymentStatus': remainingPaymentStatus,
+        'prescriptionUnlocked': prescriptionUnlocked,
         'patientPhone': patientPhone,
         'milestone': milestone.toWire(),
         'milestoneLabel': milestoneLabel,

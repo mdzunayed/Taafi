@@ -4,16 +4,16 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:url_launcher/url_launcher.dart';
 
+import '../../../core/api/home_data_providers.dart';
 import '../../../core/api/home_section_providers.dart';
 import '../../../core/api/patient_home_repository.dart';
+import '../../../core/api/platform_pricing_provider.dart';
 import '../../../core/api/promo_banner_providers.dart';
 import '../../../core/api/service_catalog_providers.dart';
 import '../../../core/config/support_config.dart';
+import '../../../core/models/home_category.dart';
 import '../../../core/models/promo_banner.dart';
-import '../../../core/models/service_catalog_item.dart';
-import '../../../core/models/service_category.dart';
 import '../../../core/theme/mt_text_styles.dart';
-import '../../../core/widgets/async_value_view.dart';
 import '../../../core/widgets/frosted_surface.dart';
 import '../../../core/widgets/initials_avatar.dart';
 import '../../../core/widgets/mt_skeleton.dart';
@@ -21,26 +21,34 @@ import '../../auth/auth_provider.dart';
 import '../../notifications/widgets/notification_bell.dart';
 import '../navigation/banner_action_dispatcher.dart';
 import '../navigation/patient_nav_provider.dart';
-import '../new_request/new_request_notifier.dart';
 import 'booking_tracking_screen.dart';
-import 'widgets/care_card_primitives.dart';
-import 'widgets/care_service_card.dart';
-import 'widgets/care_services_empty_state.dart';
+import 'widgets/care_services_section.dart';
+import 'widgets/category_filter_bar.dart';
+import 'widgets/category_services_view.dart';
 import 'widgets/dynamic_home_sections.dart';
 import 'widgets/ongoing_care_card.dart';
 import 'widgets/patient_home_palette.dart';
-import 'widgets/staggered_animated_card.dart';
 
-/// Currently-selected category chip, one of [kPatientCategoryChips]. Defaults
-/// to `'All'` (show everything). Watched by both the chip rail (to highlight
-/// the active pill) and the services grid (to filter its items).
-final selectedCategoryProvider =
-    StateProvider<String>((ref) => kServiceCategoryAll);
-
-/// Tab 0 of the patient shell — the dashboard. Renders the greeting +
-/// alert bell header, "Your care timeline" card (or the orange hero
-/// promo when no active request exists), the care-services catalog
-/// grid, the recent providers list, and the quick-help support card.
+/// Tab 0 of the patient shell — the dashboard, and the category browser it
+/// turns into.
+///
+/// **Two views, one screen.** The category rail is pinned inside the frosted
+/// header and stays put in both:
+///
+///   * **All** (the default) — the full dashboard: the promo carousel, the
+///     ongoing-care card, the Care Services block, the CMS sections, and the
+///     quick-help footer.
+///   * **Any other pill** — [CategoryServicesView]: a full-height list of only
+///     the services tagged with it, and nothing else. No masthead, no
+///     sub-filter row; the cards start directly under the rail. The generic
+///     promos and home widgets are gone, because they are about the whole
+///     catalog and the patient has just said they aren't browsing the whole
+///     catalog.
+///
+/// The switch is a pure state change — nothing re-fetches. Every card the
+/// category view needs already arrived in the `/api/home-data` payload the
+/// dashboard was built from, which is why the transition can be a 250 ms
+/// cross-fade rather than a spinner.
 ///
 /// This widget is body-only: the surrounding [Scaffold], the
 /// [BottomNavigationBar], and the cross-tab navigation provider all
@@ -58,20 +66,43 @@ class PatientHomeScreen extends ConsumerWidget {
       // error without issuing a request. See [refreshServiceCatalog].
       refreshServiceCatalog(ref),
       ref.read(homeSectionRepositoryProvider).refresh(),
+      // Same repository-not-provider rule as the catalog above: the chip rail
+      // and the Care Services layout both come from here, so a pull-to-refresh
+      // that skipped it would leave a stale CMS change on screen.
+      refreshHomeData(ref),
+      ref.read(platformPricingProvider.notifier).refresh(),
     ]);
   }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final activeRequest = ref.watch(patientActiveRequestProvider);
-    final feedAsync = ref.watch(patientHomeFeedProvider);
+    // Warm the deposit config here rather than in main(): Home is mounted at
+    // app entry, so the fetch is long finished by the time the patient reaches
+    // checkout, and no `await` lands on the cold-start path.
+    ref.watch(platformPricingProvider);
+    final selected = ref.watch(selectedCategorySlugProvider);
     final hd = HomeDark.of(context);
 
     // Height of the frosted header's content row (below the status bar). The
     // brand lockup is a two-line stack, so it needs a touch more room than
     // the old single-line greeting.
-    const double headerContent = 60;
+    //
+    // Both rows are text-driven — a two-line wordmark above a rail of pills
+    // that are themselves up to two lines — so the box has to follow the
+    // system text scale. Pinned at 60/46 it clipped the moment a patient
+    // turned type up. Measured off a 14 dp label (the size both the caption
+    // and the pill labels sit near) and clamped: past ~1.3 the header starts
+    // eating the fold, and the rows ellipsize from there anyway.
+    final double textScale = (MediaQuery.textScalerOf(context).scale(14) / 14)
+        .clamp(1.0, 1.3);
+    final double headerContent = 60 * textScale;
+    final double railHeight = kCategoryRailHeight * textScale;
     final double topInset = MediaQuery.of(context).padding.top;
+    // The rail now lives inside the glass bar, so the header owns its height
+    // and the body has to clear the whole stack — the hairline included.
+    final double headerTotal =
+        headerContent + _kRailGap + railHeight + _kRailBottomPad;
+    final double bodyTop = topInset + headerTotal + kGlassBarBorder + 12;
 
     // The scroll content flows full-bleed to the top edge and the glass
     // header is layered above it (a `Stack`), so the list visibly blurs
@@ -88,75 +119,187 @@ class PatientHomeScreen extends ConsumerWidget {
               color: hd.violetBright,
               backgroundColor: hd.surfaceHi,
               onRefresh: () => _onRefresh(ref),
-              child: ListView(
-                physics: const AlwaysScrollableScrollPhysics(),
-                // Top pad clears the frosted header; bottom keeps the last
-                // card above the floating nav pill. Horizontal padding is 0
-                // so full-bleed rails (chips, providers) can run edge-to-edge;
-                // each block re-applies its own 16 px inset.
-                padding: EdgeInsets.fromLTRB(
-                  0,
-                  topInset + headerContent + 12,
-                  0,
-                  24,
-                ),
-                children: [
-                  const _CategoryChipsRail(),
-                  const SizedBox(height: 16),
-                  const _Inset(child: _PromoCarousel()),
-                  const SizedBox(height: 24),
-                  // Ongoing-care block only appears while loading or when the
-                  // patient actually has an active request — no hero fallback.
-                  if (feedAsync.isLoading && activeRequest == null)
-                    const _Inset(child: _ActiveRequestSkeleton())
-                  else if (activeRequest != null)
-                    _Inset(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.stretch,
-                        children: [
-                          _SectionHeader(
-                            en: 'Ongoing care',
-                            trailing: _SectionAction(
-                              label: 'Track',
-                              onTap: () => ref.goToActivities(
-                                sub: PatientActivitiesTab.tracking,
-                              ),
-                            ),
-                          ),
-                          const SizedBox(height: 10),
-                          OngoingCareCard(
-                            request: activeRequest,
-                            onTrackDetails: () => openBookingTracking(
-                              context,
-                              activeRequest,
-                            ),
-                          ),
-                        ],
+              // The header offset is handed to each view rather than applied
+              // here, because the two need it in different forms: the
+              // dashboard wants it as scroll padding so its content still
+              // flows *under* the frosted bar and blurs through it, while the
+              // category listing wants a genuine bounded box that starts below
+              // the header.
+              child: AnimatedSwitcher(
+                duration: const Duration(milliseconds: 250),
+                switchInCurve: Curves.easeOutCubic,
+                switchOutCurve: Curves.easeIn,
+                // Keyed by *view*, not by slug: moving between two categories
+                // should re-render the list in place (the inner switcher
+                // animates that), while entering or leaving the dashboard is
+                // the real transition.
+                child: selected == HomeCategory.allSlug
+                    ? _HomeDashboardView(
+                        key: const ValueKey('home'),
+                        topPadding: bodyTop,
+                      )
+                    : _CategoryBrowseView(
+                        key: const ValueKey('category'),
+                        categorySlug: selected,
+                        topPadding: bodyTop,
                       ),
-                    ),
-                  if (feedAsync.isLoading || activeRequest != null)
-                    const SizedBox(height: 24),
-                  const _Inset(
-                    child: _SectionHeader(en: 'Care services', bn: 'সেবা'),
-                  ),
-                  const SizedBox(height: 12),
-                  const _ServicesGrid(),
-                  const SizedBox(height: 24),
-                  // Admin-managed server-driven sections (carries its own
-                  // insets/gaps; collapses to zero height when none exist).
-                  const DynamicHomeSections(),
-                  const _Inset(child: _QuickHelpCard()),
-                ],
               ),
             ),
           ),
         ),
         _GlassTopBar(
           topInset: topInset,
-          height: headerContent,
-          child: const _HeaderRow(),
+          height: headerTotal,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // The brand row keeps the page inset the bar used to apply for
+              // it (8 on the right, where the avatar's own padding makes up
+              // the difference).
+              SizedBox(
+                height: headerContent,
+                child: const Padding(
+                  padding: EdgeInsets.fromLTRB(16, 0, 8, 0),
+                  child: _HeaderRow(),
+                ),
+              ),
+              const SizedBox(height: _kRailGap),
+              // Admin-managed filter pills. Pinned here rather than left in
+              // the scroll body: it is the only way back out of a category
+              // view, so it must not be something a patient can scroll away
+              // from — and it makes hopping between pills a single tap from
+              // anywhere on the page.
+              //
+              // Handed the scaled height rather than reading the constant
+              // itself, so the rail and the box the header reserved for it
+              // can never disagree.
+              CategoryFilterBar(height: railHeight),
+              const SizedBox(height: _kRailBottomPad),
+            ],
+          ),
         ),
       ],
+    );
+  }
+}
+
+/// Vertical breathing room around the pinned category rail inside the glass
+/// header. Named because [PatientHomeScreen] has to add them up to work out
+/// where the scroll body starts.
+const double _kRailGap = 8;
+const double _kRailBottomPad = 10;
+
+/// The hairline under the glass bar.
+///
+/// Named because it is load-bearing twice over, and silently so. It lives in
+/// the bar's `BoxDecoration`, and a decoration border **insets its child** —
+/// `BoxDecoration.padding` returns `border.dimensions` — so the bar has to add
+/// it back on top of the content height or the last dp gets taken from the
+/// `Column`. That is the whole of the "overflowed by 1.00 pixels" bug: the
+/// header asked for exactly 124 dp of content, the hairline took one back, and
+/// the children had nowhere to put it. It also has to be cleared by the scroll
+/// body's top padding, or the first card sits a pixel under the line.
+const double kGlassBarBorder = 1;
+
+/// VIEW A — the full dashboard, shown while the "All" pill is selected.
+///
+/// Everything here is about the catalog as a whole: the promo carousel, the
+/// patient's ongoing care, the Care Services block in whatever layout the CMS
+/// chose, the admin's server-driven sections, and the support footer.
+class _HomeDashboardView extends ConsumerWidget {
+  /// Clears the frosted header. Applied as scroll padding, not as a `Padding`
+  /// wrapper, so the list keeps flowing full-bleed underneath the glass bar
+  /// and visibly blurs through it on the way past.
+  final double topPadding;
+
+  const _HomeDashboardView({super.key, required this.topPadding});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final activeRequest = ref.watch(patientActiveRequestProvider);
+    final feedAsync = ref.watch(patientHomeFeedProvider);
+
+    return ListView(
+      physics: const AlwaysScrollableScrollPhysics(),
+      // Horizontal padding is 0 so full-bleed rails (chips, providers) can run
+      // edge-to-edge; each block re-applies its own 16 px inset. The bottom
+      // pad keeps the last card above the floating nav pill.
+      padding: EdgeInsets.fromLTRB(0, topPadding, 0, 24),
+      children: [
+        const _Inset(child: _PromoCarousel()),
+        const SizedBox(height: 24),
+        // Ongoing-care block only appears while loading or when the
+        // patient actually has an active request — no hero fallback.
+        if (feedAsync.isLoading && activeRequest == null)
+          const _Inset(child: _ActiveRequestSkeleton())
+        else if (activeRequest != null)
+          _Inset(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: [
+                _SectionHeader(
+                  en: 'Ongoing care',
+                  trailing: _SectionAction(
+                    label: 'Track',
+                    onTap: () => ref.goToActivities(
+                      sub: PatientActivitiesTab.activeCare,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                OngoingCareCard(
+                  request: activeRequest,
+                  onTrackDetails: () =>
+                      openBookingTracking(context, activeRequest),
+                ),
+              ],
+            ),
+          ),
+        if (feedAsync.isLoading || activeRequest != null)
+          const SizedBox(height: 24),
+        // Care Services: the CMS owns its title, its layout
+        // (carousel / 2-column grid / list), and — when an admin has
+        // curated it — its cards. Carries its own header and insets.
+        const CareServicesSection(),
+        const SizedBox(height: 24),
+        // Admin-managed server-driven sections (carries its own
+        // insets/gaps; collapses to zero height when none exist).
+        const DynamicHomeSections(),
+        const _Inset(child: _QuickHelpCard()),
+      ],
+    );
+  }
+}
+
+/// VIEW B — the dedicated category listing.
+///
+/// A thin wrapper so the switcher has a stable widget to key on while
+/// [CategoryServicesView] re-renders underneath for each pill.
+class _CategoryBrowseView extends StatelessWidget {
+  final String categorySlug;
+
+  /// A real `Padding`, unlike the dashboard's scroll inset: this view is one
+  /// full-height list with no chrome of its own, so it wants a box that starts
+  /// cleanly below the glass bar. Cards meet the rail at a hard edge here
+  /// rather than blurring under it — with nothing but cards on screen, a row
+  /// half-dissolved behind the pills reads as a rendering fault.
+  final double topPadding;
+
+  const _CategoryBrowseView({
+    super.key,
+    required this.categorySlug,
+    required this.topPadding,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(top: topPadding),
+      child: CategoryServicesView(
+        categorySlug: categorySlug,
+        // Clears the floating nav pill, same as the dashboard's trailing pad.
+        bottomInset: 24,
+      ),
     );
   }
 }
@@ -201,8 +344,16 @@ class _GlassTopBar extends StatelessWidget {
       child: FrostedSurface(
         blur: 10,
         child: Container(
-          padding: EdgeInsets.fromLTRB(16, topInset, 8, 0),
-          height: topInset + height,
+          // Only the status-bar inset. Horizontal padding is the child's own
+          // business now that the bar holds the category rail as well as the
+          // brand row — the rail has to bleed to both screen edges, and a
+          // padding here would have boxed it in and made it asymmetric.
+          padding: EdgeInsets.only(top: topInset),
+          // Status bar + content + the hairline. The border is added rather
+          // than absorbed: a `BoxDecoration` border insets the child, so
+          // without it here [child] would be handed one dp less than the
+          // [height] it was measured for and overflow by exactly that.
+          height: topInset + height + kGlassBarBorder,
           decoration: BoxDecoration(
             // On web (no backdrop blur) the fill carries the frosting, so it
             // sits more opaque; native keeps the translucent blur look.
@@ -210,7 +361,7 @@ class _GlassTopBar extends StatelessWidget {
               alpha: FrostedSurface.blurSupported ? 0.72 : 0.92,
             ),
             border: Border(
-              bottom: BorderSide(color: hd.border),
+              bottom: BorderSide(color: hd.border, width: kGlassBarBorder),
             ),
           ),
           alignment: Alignment.center,
@@ -275,8 +426,7 @@ class _HeaderRow extends ConsumerWidget {
                     ),
                     TextSpan(
                       text: 'fi',
-                      style:
-                          MtTextStyles.h2.copyWith(color: hd.violetBright),
+                      style: MtTextStyles.h2.copyWith(color: hd.violetBright),
                     ),
                   ],
                 ),
@@ -324,9 +474,7 @@ class _ProfileAvatarButton extends ConsumerWidget {
           decoration: BoxDecoration(
             shape: BoxShape.circle,
             border: Border.all(color: hd.violet, width: 2),
-            boxShadow: [
-              BoxShadow(color: hd.glow, blurRadius: 10),
-            ],
+            boxShadow: [BoxShadow(color: hd.glow, blurRadius: 10)],
           ),
           padding: const EdgeInsets.all(2),
           child: resolved.isEmpty
@@ -355,15 +503,17 @@ class _ProfileAvatarButton extends ConsumerWidget {
   }
 }
 
+/// Section header for the blocks this screen still owns. Care Services moved
+/// its own header into [CareServicesSection] along with the title, which the
+/// CMS now supplies — hence no Bengali slot here; the one caller left pairs
+/// its title with a [_SectionAction] instead.
 class _SectionHeader extends StatelessWidget {
   final String en;
-  final String? bn;
 
-  /// Optional right-aligned action (e.g. "Track ›", "View all ›"). Takes
-  /// precedence over [bn] on the trailing edge when both are supplied.
+  /// Optional right-aligned action (e.g. "Track ›", "View all ›").
   final Widget? trailing;
 
-  const _SectionHeader({required this.en, this.bn, this.trailing});
+  const _SectionHeader({required this.en, this.trailing});
 
   @override
   Widget build(BuildContext context) {
@@ -378,16 +528,7 @@ class _SectionHeader extends StatelessWidget {
             letterSpacing: 1.0,
           ),
         ),
-        if (trailing != null)
-          trailing!
-        else if (bn != null)
-          Text(
-            bn!,
-            style: MtTextStyles.sectionLabel.copyWith(
-              color: hd.muted,
-              fontFamily: 'Kalpurush',
-            ),
-          ),
+        ?trailing,
       ],
     );
   }
@@ -419,85 +560,8 @@ class _SectionAction extends StatelessWidget {
                 fontWeight: FontWeight.w700,
               ),
             ),
-            Icon(Icons.chevron_right_rounded,
-                size: 18, color: hd.violetBright),
+            Icon(Icons.chevron_right_rounded, size: 18, color: hd.violetBright),
           ],
-        ),
-      ),
-    );
-  }
-}
-
-/// Horizontal, edge-to-edge rail of selectable category chips. Reads and
-/// writes [selectedCategoryProvider]; the active chip is filled brand-orange,
-/// the rest are hairline-bordered pills. Filtering happens in [_ServicesGrid].
-class _CategoryChipsRail extends ConsumerWidget {
-  const _CategoryChipsRail();
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final selected = ref.watch(selectedCategoryProvider);
-    return SizedBox(
-      height: 38,
-      child: ListView.separated(
-        scrollDirection: Axis.horizontal,
-        padding: const EdgeInsets.symmetric(horizontal: 16),
-        itemCount: kPatientCategoryChips.length,
-        separatorBuilder: (_, _) => const SizedBox(width: 8),
-        itemBuilder: (context, i) {
-          final label = kPatientCategoryChips[i];
-          final active = label == selected;
-          return _CategoryChip(
-            label: label,
-            active: active,
-            onTap: () =>
-                ref.read(selectedCategoryProvider.notifier).state = label,
-          );
-        },
-      ),
-    );
-  }
-}
-
-class _CategoryChip extends StatelessWidget {
-  final String label;
-  final bool active;
-  final VoidCallback onTap;
-
-  const _CategoryChip({
-    required this.label,
-    required this.active,
-    required this.onTap,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final hd = HomeDark.of(context);
-    return Material(
-      color: active ? hd.accent : hd.surface,
-      borderRadius: BorderRadius.circular(999),
-      child: InkWell(
-        onTap: onTap,
-        borderRadius: BorderRadius.circular(999),
-        child: Container(
-          alignment: Alignment.center,
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(999),
-            border: Border.all(
-              color: active ? hd.accent : hd.border,
-            ),
-            boxShadow: active
-                ? [BoxShadow(color: hd.accentGlow, blurRadius: 12)]
-                : null,
-          ),
-          child: Text(
-            label,
-            style: MtTextStyles.labelMd.copyWith(
-              color: active ? Colors.white : hd.body,
-              fontWeight: active ? FontWeight.w700 : FontWeight.w600,
-            ),
-          ),
         ),
       ),
     );
@@ -577,10 +641,8 @@ class _PromoCarouselState extends ConsumerState<_PromoCarousel> {
           ],
         );
       },
-      loading: () => const SizedBox(
-        height: _cardHeight,
-        child: _PromoSkeleton(),
-      ),
+      loading: () =>
+          const SizedBox(height: _cardHeight, child: _PromoSkeleton()),
       // Error / not-yet-loaded — keep the promo strip out of the way.
       orElse: () => const SizedBox.shrink(),
     );
@@ -607,6 +669,14 @@ class _PromoSkeleton extends StatelessWidget {
 /// A single gradient promo slide rendered from a [PromoBanner]. The gradient
 /// stops, tag, title, and CTA label all come from the banner; when it carries
 /// an [PromoBanner.imageUrl] the photo sits as a faint overlay behind the copy.
+///
+/// The **whole card** is the tap target, not just the CTA button — a promo
+/// slide reads as one clickable poster, and patients tap the artwork or the
+/// headline at least as often as the button. Both routes run the same
+/// [handleBannerTap]. The card is `Material > InkWell > Ink` rather than a
+/// plain `Container` so the ripple paints *above* the gradient instead of
+/// behind it, and the button keeps its own nested `InkWell` (the inner
+/// recognizer wins the arena, so a tap on it fires exactly once).
 class _PromoSlideCard extends StatelessWidget {
   final PromoBanner banner;
   final VoidCallback onTap;
@@ -616,92 +686,100 @@ class _PromoSlideCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final hd = HomeDark.of(context);
     final hasImage = banner.imageUrl != null && banner.imageUrl!.isNotEmpty;
-    return ClipRRect(
+    // A display-only banner gets no tap target anywhere on the card: the
+    // dispatcher would no-op, and a ripple that leads nowhere reads as a
+    // broken link rather than as "this one is just a poster".
+    final action = banner.actionType == BannerActionType.none ? null : onTap;
+    return Material(
+      color: Colors.transparent,
       borderRadius: BorderRadius.circular(16),
-      child: Container(
-        decoration: BoxDecoration(
-          gradient: LinearGradient(
-            begin: Alignment.topLeft,
-            end: Alignment.bottomRight,
-            colors: banner.gradient,
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: action,
+        child: Ink(
+          decoration: BoxDecoration(
+            gradient: LinearGradient(
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+              colors: banner.gradient,
+            ),
+            border: Border.all(color: hd.violetBright.withValues(alpha: 0.35)),
           ),
-          border:
-              Border.all(color: hd.violetBright.withValues(alpha: 0.35)),
-        ),
-        child: Stack(
-          children: [
-            if (hasImage)
-              Positioned.fill(
-                child: Opacity(
-                  opacity: 0.22,
-                  child: Image.network(
-                    banner.imageUrl!,
-                    fit: BoxFit.cover,
-                    errorBuilder: (_, _, _) => const SizedBox.shrink(),
+          child: Stack(
+            children: [
+              if (hasImage)
+                Positioned.fill(
+                  child: Opacity(
+                    opacity: 0.22,
+                    child: Image.network(
+                      banner.imageUrl!,
+                      fit: BoxFit.cover,
+                      errorBuilder: (_, _, _) => const SizedBox.shrink(),
+                    ),
                   ),
                 ),
-              ),
-            Padding(
-              padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    banner.tagText,
-                    style: MtTextStyles.labelSm.copyWith(
-                      color: Colors.white.withValues(alpha: 0.85),
-                      letterSpacing: 1.2,
+              Padding(
+                padding: const EdgeInsets.fromLTRB(18, 16, 18, 16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      banner.tagText,
+                      style: MtTextStyles.labelSm.copyWith(
+                        color: Colors.white.withValues(alpha: 0.85),
+                        letterSpacing: 1.2,
+                      ),
                     ),
-                  ),
-                  const SizedBox(height: 8),
-                  Text(
-                    banner.title,
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    softWrap: true,
-                    style: MtTextStyles.h2.copyWith(
+                    const SizedBox(height: 8),
+                    Text(
+                      banner.title,
+                      maxLines: 2,
+                      overflow: TextOverflow.ellipsis,
+                      softWrap: true,
+                      style: MtTextStyles.h2.copyWith(
+                        color: Colors.white,
+                        height: 1.2,
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    Material(
                       color: Colors.white,
-                      height: 1.2,
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  Material(
-                    color: Colors.white,
-                    borderRadius: BorderRadius.circular(24),
-                    child: InkWell(
                       borderRadius: BorderRadius.circular(24),
-                      onTap: onTap,
-                      child: Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 16,
-                          vertical: 9,
-                        ),
-                        child: Row(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(
-                              banner.buttonText,
-                              style: MtTextStyles.labelMd.copyWith(
-                                color: hd.violetDeep,
-                                fontWeight: FontWeight.w700,
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(24),
+                        onTap: action,
+                        child: Padding(
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 9,
+                          ),
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Text(
+                                banner.buttonText,
+                                style: MtTextStyles.labelMd.copyWith(
+                                  color: hd.violetDeep,
+                                  fontWeight: FontWeight.w700,
+                                ),
                               ),
-                            ),
-                            const SizedBox(width: 6),
-                            Icon(
-                              Icons.arrow_forward,
-                              size: 16,
-                              color: hd.violetDeep,
-                            ),
-                          ],
+                              const SizedBox(width: 6),
+                              Icon(
+                                Icons.arrow_forward,
+                                size: 16,
+                                color: hd.violetDeep,
+                              ),
+                            ],
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                ],
+                  ],
+                ),
               ),
-            ),
-          ],
+            ],
+          ),
         ),
       ),
     );
@@ -737,7 +815,6 @@ class _PromoDots extends StatelessWidget {
   }
 }
 
-
 class _ActiveRequestSkeleton extends StatelessWidget {
   const _ActiveRequestSkeleton();
 
@@ -767,207 +844,6 @@ class _ActiveRequestSkeleton extends StatelessWidget {
   }
 }
 
-/// Adaptive Care Services layout, filtered by the active category chip. On
-/// mobile-width viewports it renders the edge-to-edge `_ServicesCarousel`
-/// rail inside a fixed-height box; on wide (web/desktop) viewports it swaps
-/// to a non-scrolling `_ServicesFluidGrid` so cards reflow instead of being
-/// cut off at the viewport edge. Screen width comes from `MediaQuery` rather
-/// than a `LayoutBuilder` because the home column is capped at 600px, so
-/// incoming constraints can never reveal a wide window.
-class _ServicesGrid extends ConsumerWidget {
-  const _ServicesGrid();
-
-  static const double _wideBreakpoint = 700;
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final async = ref.watch(activeServicesProvider);
-    final category = ref.watch(selectedCategoryProvider);
-    final bool wide = MediaQuery.sizeOf(context).width >= _wideBreakpoint;
-
-    return AsyncValueView<List<ServiceCatalogItem>>(
-      value: async,
-      onRetry: () => refreshServiceCatalog(ref),
-      // The skeleton is a horizontal rail, so it needs a bounded height in
-      // both modes; the data branch bounds only the carousel, letting the
-      // grid grow to as many rows as it needs.
-      loadingBuilder: (_) => const SizedBox(
-        height: kCareServiceCardRailHeight,
-        child: _ServicesGridSkeleton(),
-      ),
-      // Never treat the raw list as empty here — an empty *filtered* result
-      // is handled inside dataBuilder so the "no matches" copy can name the
-      // active category chip.
-      isEmpty: (list) => false,
-      emptyBuilder: (_) => const SizedBox.shrink(),
-      dataBuilder: (_, items) {
-        final filtered = [
-          for (final item in items)
-            if (serviceMatchesCategoryChip(item, category)) item,
-        ];
-        if (filtered.isEmpty) {
-          return _Inset(
-            child: CareServicesEmptyState(
-              category: category,
-              onShowAll: () => ref
-                  .read(selectedCategoryProvider.notifier)
-                  .state = kServiceCategoryAll,
-            ),
-          );
-        }
-        return wide
-            ? _Inset(child: _ServicesFluidGrid(items: filtered))
-            : SizedBox(
-                height: kCareServiceCardRailHeight,
-                child: _ServicesCarousel(items: filtered),
-              );
-      },
-    );
-  }
-}
-
-/// Non-scrolling fluid grid for wide (web/desktop) viewports. Lives inside
-/// the vertical home `ListView`, so it shrink-wraps and delegates scrolling
-/// to the page; column count and tile proportions adapt to the window width
-/// while the content itself stays within the app-wide 600px cap.
-class _ServicesFluidGrid extends StatelessWidget {
-  final List<ServiceCatalogItem> items;
-  const _ServicesFluidGrid({required this.items});
-
-  @override
-  Widget build(BuildContext context) {
-    final double w = MediaQuery.sizeOf(context).width;
-    final int cols = w >= 1000 ? 3 : 2;
-    return GridView.builder(
-      shrinkWrap: true,
-      physics: const NeverScrollableScrollPhysics(),
-      padding: EdgeInsets.zero,
-      gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
-        crossAxisCount: cols,
-        mainAxisSpacing: 12,
-        crossAxisSpacing: 12,
-        // Lands the tiles on the same 260px height the mobile rail uses.
-        childAspectRatio: careServiceGridAspectRatio(cols),
-      ),
-      itemCount: items.length,
-      itemBuilder: (_, i) => StaggeredAnimatedCard(
-        index: i,
-        child: _HomeServiceCard(item: items[i]),
-      ),
-    );
-  }
-}
-
-/// Flush-edge horizontal rail for the Care Services cards. The 16 px inset
-/// lives *inside* the ListView, so at rest the first card aligns with the
-/// section header while mid-swipe the cards clip flush against the screen
-/// edge. Only the loaded, non-empty list reaches here; the async / filter /
-/// empty-state branches stay in [_ServicesGrid].
-class _ServicesCarousel extends StatelessWidget {
-  final List<ServiceCatalogItem> items;
-  const _ServicesCarousel({required this.items});
-
-  @override
-  Widget build(BuildContext context) {
-    return ListView.separated(
-      scrollDirection: Axis.horizontal,
-      physics: const BouncingScrollPhysics(),
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      itemCount: items.length,
-      separatorBuilder: (_, _) => const SizedBox(width: 12),
-      itemBuilder: (_, i) => SizedBox(
-        width: kCareServiceCardWidth,
-        child: StaggeredAnimatedCard(
-          index: i,
-          child: _HomeServiceCard(item: items[i]),
-        ),
-      ),
-    );
-  }
-}
-
-/// Adapts a [ServiceCatalogItem] onto the shared [CareServiceCard].
-///
-/// The card itself is model-agnostic (it is also driven by the admin SDUI
-/// feed), so this thin wrapper owns the two things that are specific to the
-/// catalog: how a service's fields map onto the card's slots, and what tapping
-/// one does. There is no service detail screen — both the card body and the
-/// Book Now button prefill the booking form and jump straight to it.
-class _HomeServiceCard extends ConsumerWidget {
-  final ServiceCatalogItem item;
-  const _HomeServiceCard({required this.item});
-
-  @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    void book() {
-      ref
-          .read(newRequestProvider.notifier)
-          .applyServicePrefill(item, fromLink: true);
-      ref.goToNewRequest();
-    }
-
-    return CareServiceCard(
-      title: item.title,
-      description: item.description,
-      // Shown as stored, so an admin sees on Home exactly what they typed;
-      // the badge colour comes from the normalized value.
-      categoryLabel: item.category,
-      priceLabel: careServicePrice(item.price),
-      imageUrl: item.imageUrl,
-      onTap: book,
-    );
-  }
-}
-
-/// Placeholder rail shown while the catalog loads.
-///
-/// Mirrors the real card's silhouette — one full-bleed image block with the
-/// text stack anchored to the bottom — rather than an arbitrary shape, so the
-/// switch to loaded data doesn't visibly reflow the row.
-class _ServicesGridSkeleton extends StatelessWidget {
-  const _ServicesGridSkeleton();
-
-  @override
-  Widget build(BuildContext context) {
-    final hd = HomeDark.of(context);
-    return ListView.separated(
-      scrollDirection: Axis.horizontal,
-      padding: const EdgeInsets.symmetric(horizontal: 16),
-      itemCount: 4,
-      separatorBuilder: (_, _) => const SizedBox(width: 12),
-      itemBuilder: (context, _) => Container(
-        width: kCareServiceCardWidth,
-        clipBehavior: Clip.antiAlias,
-        decoration: BoxDecoration(
-          color: hd.violet.withValues(alpha: 0.16),
-          borderRadius: BorderRadius.circular(kCareCardRadius),
-          border: Border.all(color: hd.border),
-        ),
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(14, 12, 12, 12),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.end,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              MtSkeleton.line(width: 120),
-              const SizedBox(height: 8),
-              MtSkeleton.line(width: 90, height: 10),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  MtSkeleton.line(width: 60, height: 12),
-                  const Spacer(),
-                  MtSkeleton.box(width: 90, height: 36, radius: 999),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
 /// Wide support footer — a single tappable row that direct-dials the
 /// helpline. Phone glyph in a tinted box, "Need help?" title, and the
 /// operational-hours label, with a trailing chevron. Mirrors the mockup's
@@ -981,13 +857,15 @@ class _QuickHelpCard extends StatelessWidget {
     try {
       final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
       if (!ok && context.mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text(fallback)));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(fallback)));
       }
     } catch (_) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context)
-            .showSnackBar(SnackBar(content: Text(fallback)));
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(fallback)));
       }
     }
   }
@@ -1016,8 +894,11 @@ class _QuickHelpCard extends StatelessWidget {
                   color: hd.violet.withValues(alpha: 0.20),
                   borderRadius: BorderRadius.circular(12),
                 ),
-                child: Icon(Icons.phone_in_talk_rounded,
-                    color: hd.violetBright, size: 22),
+                child: Icon(
+                  Icons.phone_in_talk_rounded,
+                  color: hd.violetBright,
+                  size: 22,
+                ),
               ),
               const SizedBox(width: 14),
               Expanded(
@@ -1042,8 +923,7 @@ class _QuickHelpCard extends StatelessWidget {
                 ),
               ),
               const SizedBox(width: 8),
-              Icon(Icons.chevron_right_rounded,
-                  color: hd.muted, size: 22),
+              Icon(Icons.chevron_right_rounded, color: hd.muted, size: 22),
             ],
           ),
         ),

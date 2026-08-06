@@ -1,6 +1,8 @@
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../new_request/new_request_notifier.dart';
+
 class PatientNavIndex {
   PatientNavIndex._();
 
@@ -16,19 +18,26 @@ class PatientNavIndex {
   }
 }
 
-enum PatientActivitiesTab { underReview, tracking, history, medications }
+/// Sub-tabs of the Activities destination.
+///
+/// "Under Review" and "Service Status" used to be two of these. They were one
+/// booking split across two screens with two independently-derived timelines,
+/// plus a status→tab mapping that had to be kept in sync everywhere a
+/// deep-link landed. They are now the single [PatientActivitiesTab.activeCare]
+/// destination; the retired names live on as aliases in
+/// `dynamic_route_dispatcher.dart` so server-issued routes and old
+/// notification payloads still resolve.
+enum PatientActivitiesTab { activeCare, history, medications }
 
 extension PatientActivitiesTabX on PatientActivitiesTab {
   int get index {
     switch (this) {
-      case PatientActivitiesTab.underReview:
+      case PatientActivitiesTab.activeCare:
         return 0;
-      case PatientActivitiesTab.tracking:
-        return 1;
       case PatientActivitiesTab.history:
-        return 2;
+        return 1;
       case PatientActivitiesTab.medications:
-        return 3;
+        return 2;
     }
   }
 }
@@ -39,16 +48,30 @@ class PatientNavController extends Notifier<int> {
 
   void changeTab(int index) {
     final next = PatientNavIndex.clamp(index);
-    if (state != next) {
-      HapticFeedback.lightImpact();
-      state = next;
+    if (state == next) return;
+
+    // Leaving the New Request destination abandons the booking flow, so the
+    // in-progress form goes with it. This is the shell's stand-in for a
+    // `PopScope` reset on a pushed route: the tab is never popped, it's a
+    // permanent child of the IndexedStack, so nothing else would ever clear it.
+    //
+    // Only the *leaving* edge is handled here. Resetting on arrival would race
+    // the six entry points that prefill a service and then call
+    // `goToNewRequest()` (catalog card, service detail, home section, promo
+    // banner, dynamic route, "book again") — their prefill would be wiped by
+    // the navigation that is supposed to reveal it.
+    if (state == PatientNavIndex.newRequest) {
+      ref.read(newRequestProvider.notifier).resetBookingForm();
     }
+
+    HapticFeedback.lightImpact();
+    state = next;
   }
 }
 
 class PatientActivitiesController extends Notifier<PatientActivitiesTab> {
   @override
-  PatientActivitiesTab build() => PatientActivitiesTab.underReview;
+  PatientActivitiesTab build() => PatientActivitiesTab.activeCare;
 
   void setTab(PatientActivitiesTab tab) {
     if (state != tab) {
@@ -78,9 +101,10 @@ extension PatientShellNavExt on WidgetRef {
       read(patientNavProvider.notifier).changeTab(PatientNavIndex.account);
 
   /// Jumps into Activities, optionally pre-selecting the sub-tab.
-  /// Defaults to "Under Review" — same landing the old chip nav had.
+  /// Defaults to "Active Care" — the booking in flight is what a patient
+  /// opening this destination is nearly always here for.
   void goToActivities({
-    PatientActivitiesTab sub = PatientActivitiesTab.underReview,
+    PatientActivitiesTab sub = PatientActivitiesTab.activeCare,
   }) {
     read(patientActivitiesTabProvider.notifier).setTab(sub);
     read(patientNavProvider.notifier).changeTab(PatientNavIndex.activities);

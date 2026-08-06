@@ -11,6 +11,7 @@ import '../../auth/auth_provider.dart';
 import '../../shared/presentation/widgets/active_chat_drawer.dart';
 import '../providers/nurse_workflow_provider.dart';
 import 'collect_cash_panel.dart';
+import 'widgets/patient_documents_panel.dart';
 import 'widgets/target_patient_panel.dart';
 
 /// Phase 3 + 4 of the Nurse Operations Hub: a full-screen procedural
@@ -265,10 +266,23 @@ class _ActiveNurseConsoleScreenState
                     padding: const EdgeInsets.fromLTRB(16, 16, 16, 16),
                     children: [
                       _PatientHeaderCard(appt: _appt),
-                      if (_appt.isCashOnService) ...[
-                        const SizedBox(height: 12),
-                        const CashOnServiceBadge(),
-                      ],
+                      // Payment posture, stated up front so the nurse knows
+                      // before they start whether a cash handoff is coming —
+                      // and kept live, so a patient switching to (or
+                      // completing) online payment mid-visit flips this card
+                      // instead of leaving a stale cash prompt on screen.
+                      const SizedBox(height: 12),
+                      BookingPaymentBanner(
+                        bookingId: _appt.id,
+                        fallbackIsCashOnService: _appt.isCashOnService,
+                      ),
+                      // Discharge summaries, old prescriptions, lab reports.
+                      // Above the vitals form deliberately: a wound-care or
+                      // post-op visit is often defined by the document the
+                      // patient attached, and reading it after logging vitals
+                      // is reading it too late.
+                      const SizedBox(height: 12),
+                      PatientDocumentsPanel(bookingId: _appt.id),
                       const SizedBox(height: 20),
                       _SectionLabel('Patient vitals ingestion'),
                       const SizedBox(height: 8),

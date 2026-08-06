@@ -3,6 +3,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/models/doctor_dashboard.dart';
+import '../../../core/network/socket_manager.dart';
 import '../../../core/theme/app_colors_ext.dart';
 import '../../../core/theme/mt_text_styles.dart';
 import '../../../core/widgets/initials_avatar.dart';
@@ -56,6 +57,15 @@ class DoctorMainShell extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    // Live-refresh the workspace the instant an admin assigns this doctor —
+    // same contract the nurse shell honours. `dispatch:incoming` lands in the
+    // doctor's own room on assignment, and invalidating here pulls the new
+    // visit into Appointments (and the triage badge) in the same beat as the
+    // dispatch banner, instead of waiting out the 10s dashboard poll.
+    ref.listen<DispatchAlert?>(dispatchAlertProvider, (prev, next) {
+      if (next != null) ref.invalidate(doctorDashboardProvider);
+    });
+
     final index = ref.watch(doctorNavProvider);
     final alert = ref.watch(doctorLiveAlertProvider);
     final pendingTriage = ref.watch(pendingTriageCountProvider);

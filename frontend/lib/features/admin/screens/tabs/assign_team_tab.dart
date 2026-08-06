@@ -9,7 +9,9 @@ import '../../../../core/widgets/initials_avatar.dart';
 import '../../../../core/widgets/mt_empty_state.dart';
 import '../../../../core/widgets/mt_error_state.dart';
 import '../../../doctor/doctor_providers.dart';
+import '../../admin_nav.dart';
 import '../../admin_providers.dart';
+import '../../widgets/patient_documents_card.dart';
 
 /// Admin "Assign team" surface. Built around two distinct provider
 /// rosters — doctors and nurses — that the admin can select from
@@ -25,9 +27,7 @@ import '../../admin_providers.dart';
 ///     on the left, then a tabbed pane that flips between the two
 ///     rosters with the sticky finalize bar pinned below.
 class AssignTeamTab extends ConsumerWidget {
-  final ValueChanged<int>? onNavigateTab;
-
-  const AssignTeamTab({super.key, this.onNavigateTab});
+  const AssignTeamTab({super.key});
 
   static const double _wideBreakpoint = 1100;
 
@@ -45,9 +45,11 @@ class AssignTeamTab extends ConsumerWidget {
               icon: Icons.person_add_disabled,
               title: 'No request selected',
               subtitle:
-                  'Pick a pending request from the Review Queue to start matching a doctor and nurse.',
-              actionLabel: 'Go to Review Queue',
-              onAction: () => onNavigateTab?.call(1),
+                  'Pick a booking from the All bookings tab to start matching a doctor and nurse.',
+              actionLabel: 'Go to All bookings',
+              onAction: () => ref
+                  .read(bookingsTabProvider.notifier)
+                  .state = BookingsTab.all,
             ),
           ),
         ),
@@ -354,6 +356,9 @@ class _RequestDetailsColumn extends StatelessWidget {
                 ],
               ),
             ),
+            // Last thing the admin reads before the provider pool on the
+            // right — a discharge summary can change WHO should be sent.
+            PatientDocumentsCard(attachments: request.attachments),
           ],
         ),
       ),
@@ -492,6 +497,17 @@ class _DoctorsColumn extends ConsumerWidget {
     final selectedId = ref.watch(assignedDoctorIdProvider);
     final filter = ref.watch(dispatchFilterProvider);
 
+    // A doctor who goes on service mid-deliberation loses the selection.
+    ref.listen(availableDoctorsProvider(requestId), (_, next) {
+      _clearSelectionIfUndispatchable(
+        ref,
+        next,
+        assignedDoctorIdProvider,
+        idOf: (d) => d.id,
+        statusOf: (d) => d.dispatchStatus,
+      );
+    });
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -549,6 +565,34 @@ class _DoctorsColumn extends ConsumerWidget {
   }
 }
 
+/// Drops a selection whose provider is no longer dispatchable.
+///
+/// The roster refetches while the admin deliberates, so the provider they
+/// picked a minute ago may have gone ON_SERVICE or OFFLINE since. Without
+/// this the finalize bar stays armed and the dispatch fails with the
+/// backend's 400 — clearing the pick surfaces the change immediately
+/// instead. A provider who vanishes from the roster entirely is left
+/// selected: that's a filter change, not a duty change.
+void _clearSelectionIfUndispatchable<T>(
+  WidgetRef ref,
+  AsyncValue<List<T>> roster,
+  StateProvider<String?> selectionProvider, {
+  required String Function(T) idOf,
+  required DispatchStatus Function(T) statusOf,
+}) {
+  final rows = roster.valueOrNull;
+  if (rows == null) return;
+  final picked = ref.read(selectionProvider);
+  if (picked == null) return;
+  for (final row in rows) {
+    if (idOf(row) != picked) continue;
+    if (statusOf(row) != DispatchStatus.available) {
+      ref.read(selectionProvider.notifier).state = null;
+    }
+    return;
+  }
+}
+
 // Filter a roster down to the active duty tier. `all` is a pass-through.
 List<T> _applyDispatchFilter<T>(
   List<T> rows,
@@ -593,6 +637,17 @@ class _NursesColumn extends ConsumerWidget {
     final async = ref.watch(availableNursesProvider(requestId));
     final selectedId = ref.watch(assignedNurseIdProvider);
     final filter = ref.watch(dispatchFilterProvider);
+
+    // A nurse who goes on service mid-deliberation loses the selection.
+    ref.listen(availableNursesProvider(requestId), (_, next) {
+      _clearSelectionIfUndispatchable(
+        ref,
+        next,
+        assignedNurseIdProvider,
+        idOf: (n) => n.id,
+        statusOf: (n) => n.dispatchStatus,
+      );
+    });
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -722,15 +777,20 @@ class _ProviderTile extends StatelessWidget {
     required this.onSelect,
   });
 
-  bool get _offline => dispatchStatus == DispatchStatus.offline;
+  /// Strict one-service-at-a-time rule: only a provider the roster reports
+  /// as AVAILABLE can be dispatched. ON_SERVICE means they are executing (or
+  /// scheduled within ±2h of) another visit; OFFLINE means they can't accept
+  /// one at all. The backend rejects both with a 400 — the tile just makes
+  /// that unreachable from the UI in the first place.
+  bool get _selectable => dispatchStatus == DispatchStatus.available;
 
   @override
   Widget build(BuildContext context) {
-    // Offline providers can't accept a dispatch, so the tile reads as
-    // disabled (dimmed + non-selectable) while still being visible under the
-    // "All" filter for situational awareness.
+    // Non-dispatchable providers read as disabled (dimmed + non-selectable)
+    // while staying visible under the "All" / "On Service" filters for
+    // situational awareness — the admin can still see who is out and why.
     return Opacity(
-      opacity: _offline ? 0.55 : 1,
+      opacity: _selectable ? 1 : 0.55,
       child: Container(
         margin: const EdgeInsets.only(bottom: 10),
         decoration: BoxDecoration(
@@ -755,7 +815,7 @@ class _ProviderTile extends StatelessWidget {
           borderRadius: BorderRadius.circular(12),
           child: InkWell(
             borderRadius: BorderRadius.circular(12),
-            onTap: _offline ? null : onSelect,
+            onTap: _selectable ? onSelect : null,
             child: Padding(
               padding: const EdgeInsets.all(14),
               child: Row(
@@ -839,7 +899,10 @@ class _ProviderTile extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(width: 10),
-                  _SelectChevron(isSelected: isSelected),
+                  _SelectChevron(
+                    isSelected: isSelected,
+                    enabled: _selectable,
+                  ),
                 ],
               ),
             ),
@@ -921,10 +984,32 @@ class _StatusBadge extends StatelessWidget {
 
 class _SelectChevron extends StatelessWidget {
   final bool isSelected;
-  const _SelectChevron({required this.isSelected});
+
+  /// False for ON_SERVICE / OFFLINE providers. The affordance swaps from
+  /// "+ add to team" to a filled lock, so the row reads as blocked rather
+  /// than merely unselected — paired with the amber "On Visit · ends 4:30 PM"
+  /// badge it explains itself without a tap.
+  final bool enabled;
+
+  const _SelectChevron({required this.isSelected, this.enabled = true});
 
   @override
   Widget build(BuildContext context) {
+    if (!enabled) {
+      return Container(
+        width: 32,
+        height: 32,
+        decoration: const BoxDecoration(
+          color: MtColors.line,
+          shape: BoxShape.circle,
+        ),
+        child: const Icon(
+          Icons.lock_outline,
+          size: 16,
+          color: MtColors.ink3,
+        ),
+      );
+    }
     return AnimatedContainer(
       duration: const Duration(milliseconds: 150),
       width: 32,

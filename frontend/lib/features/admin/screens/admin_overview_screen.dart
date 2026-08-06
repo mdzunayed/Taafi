@@ -10,23 +10,16 @@ import '../../../core/widgets/mt_search_field.dart';
 import '../../auth/auth_provider.dart';
 import '../../notifications/widgets/notification_bell.dart';
 import '../../chat/presentation/conversation_inbox_button.dart';
+import '../admin_nav.dart';
 import '../admin_providers.dart';
+import 'hubs/bookings_hub.dart';
+import 'hubs/finance_hub.dart';
+import 'hubs/providers_hub.dart';
+import 'hubs/services_hub.dart';
 import 'tabs/admin_banner_management_page.dart';
 import 'tabs/admin_booking_review.dart';
-import 'tabs/admin_cash_clearance_page.dart';
-import 'tabs/admin_finance_page.dart';
-import 'tabs/admin_home_sections_page.dart';
-import 'tabs/assign_team_tab.dart';
-import 'tabs/billing_tab.dart';
-import 'tabs/live_booking_pipeline_page.dart';
-import 'tabs/live_monitor_tab.dart';
-import 'tabs/manage_services_tab.dart';
 import 'tabs/overview_tab.dart';
 import 'tabs/patients_tab.dart';
-import 'tabs/prescription_approval_tab.dart';
-import 'tabs/provider_verification_tab.dart';
-import 'tabs/providers_tab.dart';
-import 'tabs/review_queue_tab.dart';
 import 'tabs/settings_tab.dart';
 
 class AdminOverviewScreen extends ConsumerStatefulWidget {
@@ -48,35 +41,29 @@ class _AdminOverviewScreenState extends ConsumerState<AdminOverviewScreen> {
   void _toggleSidebar() =>
       setState(() => _isSidebarCollapsed = !_isSidebarCollapsed);
 
-  // Indices are referenced by the sidebar `_SidebarItem`s below — keep
-  // these in lockstep with that list when reordering.
-  //   0 Overview          5 Providers        10 Booking review     15 Doctor verification
-  //   1 Review queue      6 Patients         11 Home sections      16 Nurse verification
-  //   2 Assign team       7 Billing          12 Rx approvals       17 Provider payouts
-  //   3 Live monitor      8 Settings         13 Booking pipeline
-  //   4 Manage services   9 Banners          14 Cash clearance
+  /// The eight destinations, ordered to match [AdminSection]'s constants.
+  /// Each entry is either a leaf screen or a hub that owns its own sub-tabs,
+  /// so this list no longer grows every time a screen is added — a new
+  /// screen becomes a tab inside the hub it belongs to.
   late final _tabs = <Widget>[
-    OverviewTab(onNavigateTab: _navigate),
-    ReviewQueueTab(onNavigateTab: _navigate),
-    AssignTeamTab(onNavigateTab: _navigate),
-    const LiveMonitorTab(),
-    const ManageServicesTab(),
-    const ProvidersTab(),
+    OverviewTab(onOpenBookings: _openBookings),
+    const BookingsHub(),
+    const ProvidersHub(),
     const PatientsTab(),
-    const BillingTab(),
-    const SettingsTab(),
+    const ServicesHub(),
     const AdminBannerManagementPage(),
-    const AdminBookingReviewPage(),
-    const AdminHomeSectionsPage(),
-    const PrescriptionApprovalTab(),
-    LiveBookingPipelinePage(onNavigateTab: _navigate),
-    const AdminCashClearancePage(),
-    const ProviderVerificationTab(role: 'doctor'),
-    const ProviderVerificationTab(role: 'nurse'),
-    AdminFinancePage(onNavigateTab: _navigate),
+    const FinanceHub(),
+    const SettingsTab(),
   ];
 
   void _navigate(int idx) => setState(() => _selectedIndex = idx);
+
+  /// Jump into the Bookings hub on a specific lane. Sub-tab selection lives
+  /// in a provider so the hub picks it up on mount.
+  void _openBookings(BookingsTab tab) {
+    ref.read(bookingsTabProvider.notifier).state = tab;
+    _navigate(AdminSection.bookings);
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -141,26 +128,35 @@ class _AdminSidebar extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final counts = ref.watch(requestCountsProvider);
-    final bookingReviewCount = ref.watch(bookingReviewCountProvider);
+    final user = ref.watch(currentUserProvider);
+
+    // Each consolidated link carries the sum of the queues its hub now
+    // owns, so collapsing the rail didn't cost the at-a-glance workload
+    // the individual badges used to give.
     final rxQueueCount = ref.watch(adminPrescriptionQueueProvider).maybeWhen(
           data: (scripts) => scripts.length,
           orElse: () => 0,
         );
-    final kpiAsync = ref.watch(dashboardTelemetryProvider);
-    final user = ref.watch(currentUserProvider);
-    final activeServicesCount = kpiAsync.maybeWhen(
-      data: (kpi) => kpi.activeServices,
-      orElse: () => 0,
-    );
-    final cashOutstandingCount = ref.watch(cashInHandProvider).maybeWhen(
-          data: (s) => s.outstandingProvidersCount,
-          orElse: () => 0,
-        );
-    final pendingPayoutCount = ref.watch(payoutRequestsProvider).maybeWhen(
-          data: (q) => q.pendingCount,
-          orElse: () => 0,
-        );
+    final bookingsActionCount = ref.watch(bookingReviewCountProvider) +
+        ref.watch(needsAssignmentQueueProvider).length +
+        rxQueueCount;
+
+    final pendingVerificationCount =
+        ref.watch(adminProvidersListProvider).maybeWhen(
+              data: (list) =>
+                  list.where((p) => !p.isVerified && !p.isSuspended).length,
+              orElse: () => 0,
+            );
+
+    final financeActionCount = (ref.watch(cashInHandProvider).maybeWhen(
+                  data: (s) => s.outstandingProvidersCount,
+                  orElse: () => 0,
+                ) +
+            ref.watch(payoutRequestsProvider).maybeWhen(
+                  data: (q) => q.pendingCount,
+                  orElse: () => 0,
+                ))
+        .toInt();
 
     return AnimatedContainer(
       duration: const Duration(milliseconds: 240),
@@ -221,166 +217,103 @@ class _AdminSidebar extends ConsumerWidget {
               padding: EdgeInsets.symmetric(horizontal: collapsed ? 10 : 16),
               children: [
                 _SidebarSection(
-                  title: 'Operations Control',
+                  title: 'Operations',
                   collapsed: collapsed,
                   children: [
                     _SidebarItem(
                       icon: Icons.grid_view,
                       label: 'Overview',
-                      selected: selectedIndex == 0,
+                      selected: selectedIndex == AdminSection.overview,
                       collapsed: collapsed,
-                      onTap: () => onDestinationSelected(0),
+                      onTap: () =>
+                          onDestinationSelected(AdminSection.overview),
                     ),
+                    // One link for the whole booking lifecycle. The badge
+                    // sums every lane that needs an admin's hands, so the
+                    // rail still shows the same total work the six former
+                    // entries did between them.
                     _SidebarItem(
-                      icon: Icons.account_tree_outlined,
-                      label: 'Booking pipeline',
-                      selected: selectedIndex == 13,
-                      collapsed: collapsed,
-                      onTap: () => onDestinationSelected(13),
-                    ),
-                    _SidebarItem(
-                      icon: Icons.show_chart,
-                      label: 'Live monitor',
-                      badgeCount: activeServicesCount == 0
+                      icon: Icons.receipt_long_rounded,
+                      label: 'Bookings',
+                      badgeCount: bookingsActionCount == 0
                           ? null
-                          : activeServicesCount,
-                      selected: selectedIndex == 3,
+                          : bookingsActionCount,
+                      selected: selectedIndex == AdminSection.bookings,
                       collapsed: collapsed,
-                      onTap: () => onDestinationSelected(3),
-                    ),
-                    _SidebarItem(
-                      icon: Icons.list_alt,
-                      label: 'Review queue',
-                      badgeCount:
-                          counts['pending'] == 0 ? null : counts['pending'],
-                      selected: selectedIndex == 1,
-                      collapsed: collapsed,
-                      onTap: () => onDestinationSelected(1),
-                    ),
-                    _SidebarItem(
-                      icon: Icons.request_quote_outlined,
-                      label: 'Booking review',
-                      badgeCount: bookingReviewCount == 0
-                          ? null
-                          : bookingReviewCount,
-                      selected: selectedIndex == 10,
-                      collapsed: collapsed,
-                      onTap: () => onDestinationSelected(10),
-                    ),
-                    _SidebarItem(
-                      icon: Icons.people_outline,
-                      label: 'Assign team',
-                      selected: selectedIndex == 2,
-                      collapsed: collapsed,
-                      onTap: () => onDestinationSelected(2),
-                    ),
-                    _SidebarItem(
-                      icon: Icons.medication_outlined,
-                      label: 'Rx approvals',
-                      badgeCount: rxQueueCount == 0 ? null : rxQueueCount,
-                      selected: selectedIndex == 12,
-                      collapsed: collapsed,
-                      onTap: () => onDestinationSelected(12),
+                      onTap: () =>
+                          onDestinationSelected(AdminSection.bookings),
                     ),
                   ],
                 ),
                 _SidebarSection(
-                  title: 'People & Verification',
+                  title: 'People',
                   collapsed: collapsed,
                   children: [
                     _SidebarItem(
-                      icon: Icons.medical_information_outlined,
-                      label: 'Doctor verification',
-                      selected: selectedIndex == 15,
-                      collapsed: collapsed,
-                      onTap: () => onDestinationSelected(15),
-                    ),
-                    _SidebarItem(
-                      icon: Icons.vaccines_outlined,
-                      label: 'Nurse verification',
-                      selected: selectedIndex == 16,
-                      collapsed: collapsed,
-                      onTap: () => onDestinationSelected(16),
-                    ),
-                    _SidebarItem(
                       icon: Icons.local_hospital_outlined,
                       label: 'Providers',
-                      selected: selectedIndex == 5,
+                      badgeCount: pendingVerificationCount == 0
+                          ? null
+                          : pendingVerificationCount,
+                      selected: selectedIndex == AdminSection.providers,
                       collapsed: collapsed,
-                      onTap: () => onDestinationSelected(5),
+                      onTap: () =>
+                          onDestinationSelected(AdminSection.providers),
                     ),
                     _SidebarItem(
                       icon: Icons.favorite_border,
                       label: 'Patients',
-                      selected: selectedIndex == 6,
+                      selected: selectedIndex == AdminSection.patients,
                       collapsed: collapsed,
-                      onTap: () => onDestinationSelected(6),
+                      onTap: () =>
+                          onDestinationSelected(AdminSection.patients),
                     ),
                   ],
                 ),
                 _SidebarSection(
-                  title: 'Finance & Ledger',
-                  collapsed: collapsed,
-                  children: [
-                    _SidebarItem(
-                      icon: Icons.receipt_long_outlined,
-                      label: 'Billing',
-                      selected: selectedIndex == 7,
-                      collapsed: collapsed,
-                      onTap: () => onDestinationSelected(7),
-                    ),
-                    _SidebarItem(
-                      icon: Icons.account_balance_wallet_outlined,
-                      label: 'Cash clearance',
-                      badgeCount: cashOutstandingCount == 0
-                          ? null
-                          : cashOutstandingCount,
-                      selected: selectedIndex == 14,
-                      collapsed: collapsed,
-                      onTap: () => onDestinationSelected(14),
-                    ),
-                    _SidebarItem(
-                      icon: Icons.payments_outlined,
-                      label: 'Provider payouts',
-                      badgeCount:
-                          pendingPayoutCount == 0 ? null : pendingPayoutCount,
-                      selected: selectedIndex == 17,
-                      collapsed: collapsed,
-                      onTap: () => onDestinationSelected(17),
-                    ),
-                  ],
-                ),
-                _SidebarSection(
-                  title: 'CMS & System',
+                  title: 'Content',
                   collapsed: collapsed,
                   children: [
                     _SidebarItem(
                       icon: Icons.medical_services_outlined,
-                      label: 'Manage services',
-                      selected: selectedIndex == 4,
+                      label: 'Services & categories',
+                      selected: selectedIndex == AdminSection.services,
                       collapsed: collapsed,
-                      onTap: () => onDestinationSelected(4),
+                      onTap: () =>
+                          onDestinationSelected(AdminSection.services),
                     ),
                     _SidebarItem(
                       icon: Icons.view_carousel_rounded,
                       label: 'Banners',
-                      selected: selectedIndex == 9,
+                      selected: selectedIndex == AdminSection.banners,
                       collapsed: collapsed,
-                      onTap: () => onDestinationSelected(9),
+                      onTap: () =>
+                          onDestinationSelected(AdminSection.banners),
                     ),
+                  ],
+                ),
+                _SidebarSection(
+                  title: 'Finance & system',
+                  collapsed: collapsed,
+                  children: [
                     _SidebarItem(
-                      icon: Icons.dashboard_customize_outlined,
-                      label: 'Home sections',
-                      selected: selectedIndex == 11,
+                      icon: Icons.account_balance_wallet_outlined,
+                      label: 'Finance',
+                      badgeCount: financeActionCount == 0
+                          ? null
+                          : financeActionCount,
+                      selected: selectedIndex == AdminSection.finance,
                       collapsed: collapsed,
-                      onTap: () => onDestinationSelected(11),
+                      onTap: () =>
+                          onDestinationSelected(AdminSection.finance),
                     ),
                     _SidebarItem(
                       icon: Icons.settings_outlined,
                       label: 'Settings',
-                      selected: selectedIndex == 8,
+                      selected: selectedIndex == AdminSection.settings,
                       collapsed: collapsed,
-                      onTap: () => onDestinationSelected(8),
+                      onTap: () =>
+                          onDestinationSelected(AdminSection.settings),
                     ),
                   ],
                 ),
@@ -813,42 +746,22 @@ class _AdminTopBarState extends ConsumerState<_AdminTopBar> {
 
   String _getTabTitle() {
     switch (widget.selectedIndex) {
-      case 0:
+      case AdminSection.overview:
         return 'Overview';
-      case 1:
-        return 'Review queue';
-      case 2:
-        return 'Assign team';
-      case 3:
-        return 'Live monitor';
-      case 4:
-        return 'Manage services';
-      case 5:
+      case AdminSection.bookings:
+        return 'Bookings';
+      case AdminSection.providers:
         return 'Providers';
-      case 6:
+      case AdminSection.patients:
         return 'Patients';
-      case 7:
-        return 'Billing';
-      case 8:
-        return 'Settings';
-      case 9:
+      case AdminSection.services:
+        return 'Services & categories';
+      case AdminSection.banners:
         return 'Promo banners';
-      case 10:
-        return 'Booking review';
-      case 11:
-        return 'Home sections';
-      case 12:
-        return 'Rx approvals';
-      case 13:
-        return 'Live booking pipeline';
-      case 14:
-        return 'Provider cash clearance';
-      case 15:
-        return 'Doctor verification';
-      case 16:
-        return 'Nurse verification';
-      case 17:
-        return 'Provider payouts';
+      case AdminSection.finance:
+        return 'Finance';
+      case AdminSection.settings:
+        return 'Settings';
       default:
         return 'Dashboard';
     }
@@ -887,7 +800,11 @@ class _AdminTopBarState extends ConsumerState<_AdminTopBar> {
                       ref.read(requestFilterProvider.notifier).state = ref
                           .read(requestFilterProvider)
                           .copyWith(searchQuery: val);
-                      widget.onNavigateTab(1);
+                      // Land on the full booking table, where the search
+                      // query actually narrows something.
+                      ref.read(bookingsTabProvider.notifier).state =
+                          BookingsTab.all;
+                      widget.onNavigateTab(AdminSection.bookings);
                     },
                   ),
                 ),

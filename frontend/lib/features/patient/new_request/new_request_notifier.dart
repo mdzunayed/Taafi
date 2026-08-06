@@ -4,10 +4,12 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/api/dio_client.dart' show ActiveBookingConflict;
 import '../../../core/api/patient_home_repository.dart';
+import '../../../core/models/request_document.dart';
 import '../../../core/models/service_catalog_item.dart';
 import '../../admin/admin_providers.dart';
 import '../../auth/auth_provider.dart';
 import '../../doctor/doctor_providers.dart';
+import '../checkout/booking_payment_method.dart';
 import 'new_request_state.dart';
 
 /// Validation outcome — either `null` for "all clear" or a localized message
@@ -49,6 +51,17 @@ class NewRequestNotifier extends AutoDisposeNotifier<NewRequestState> {
       selectedService: service,
       validationError: null,
     );
+  }
+
+  // ------------------------------------------- deposit rail (checkout step)
+
+  /// Records the rail for the booking deposit. Cash is rejected: the
+  /// deposit is what unlocks Care Management's review, so it has to clear
+  /// online before anyone is dispatched. The payment sheet doesn't offer
+  /// cash at all — this is the belt to that braces.
+  void setPaymentMethod(BookingPaymentMethod? method) {
+    if (method != null && method.isCash) return;
+    state = state.copyWith(paymentMethod: method, validationError: null);
   }
 
   /// Re-open the full service list after a link-driven prefill — the "Change"
@@ -127,23 +140,22 @@ class NewRequestNotifier extends AutoDisposeNotifier<NewRequestState> {
     state = state.copyWith(careRecipient: recipient);
   }
 
-  // ------------------------------------------------------------- attachments
+  // ------------------------------------------------------- medical documents
 
-  void setDischarge(String? filename) {
-    state = state.copyWith(
-      attachments: state.attachments.copyWith(discharge: filename),
-    );
+  /// Attach an already-uploaded document (see
+  /// [DioClient.uploadPatientDocument]). De-duplicated by url so a double-tap
+  /// on the picker can't list the same file twice.
+  void addDocument(RequestDocument doc) {
+    if (state.documents.any((d) => d.url == doc.url)) return;
+    state = state.copyWith(documents: [...state.documents, doc]);
   }
 
-  void setVitals(String? summary) {
+  void removeDocument(RequestDocument doc) {
     state = state.copyWith(
-      attachments: state.attachments.copyWith(vitals: summary),
-    );
-  }
-
-  void setVoiceNote(String? label) {
-    state = state.copyWith(
-      attachments: state.attachments.copyWith(voiceNote: label),
+      documents: [
+        for (final d in state.documents)
+          if (d.url != doc.url) d,
+      ],
     );
   }
 
@@ -156,7 +168,7 @@ class NewRequestNotifier extends AutoDisposeNotifier<NewRequestState> {
       return 'Please choose a type of care.';
     }
     if (state.address.isEmpty) {
-      return 'Please add your address before submitting.';
+      return 'Please add your care address before submitting.';
     }
     if (state.timing == RequestTiming.scheduled) {
       final when = state.scheduledAt;
@@ -166,6 +178,12 @@ class NewRequestNotifier extends AutoDisposeNotifier<NewRequestState> {
       if (when.isBefore(DateTime.now())) {
         return 'Scheduled time must be in the future.';
       }
+    }
+    // Checkout step: the rail must be chosen before we open the deposit
+    // gateway, because it also records how the patient intends to settle the
+    // balance (cash at the door vs digital).
+    if (state.paymentMethod == null) {
+      return 'Add a payment method to confirm your booking.';
     }
     return null;
   }
@@ -217,7 +235,16 @@ class NewRequestNotifier extends AutoDisposeNotifier<NewRequestState> {
         // the attending role from the title.
         'service_id': service.id,
         'preferred_time': state.scheduledAt?.toIso8601String(),
-        'condition_note': state.notes.trim(),
+        'condition_note': _buildConditionNote(),
+        // Previous medical documents (PDF / image) attached on the service
+        // step. Already uploaded via POST /patient/documents — these are the
+        // descriptors that upload returned.
+        'documents': [for (final d in state.documents) d.toPayload()],
+        // The online rail for the deposit. No price is sent: under
+        // deposit-first pricing the fee doesn't exist until Care Management
+        // sets it, and `payment_preference` (cash vs online for the REMAINING
+        // balance) is chosen later, once the patient knows the amount.
+        'payment_channel': state.paymentMethod?.wireValue,
         // Join only the parts that exist. The address book now captures one
         // consolidated line (so `line1` is routinely empty), and a naive
         // interpolation would ship a leading ", " into the clinician's
@@ -305,7 +332,45 @@ class NewRequestNotifier extends AutoDisposeNotifier<NewRequestState> {
     state = state.copyWith(submission: const AsyncData(null));
   }
 
+  /// Clears every answer the patient gave on this booking — service, recipient,
+  /// notes, attached documents, promo code, timing, deposit rail, and any
+  /// leftover validation/submission status.
+  ///
+  /// Needed because [AutoDisposeNotifier]'s dispose never actually fires for
+  /// this provider: `NewRequestTab` is a permanent child of the patient shell's
+  /// `IndexedStack`, so it watches this provider from the first frame to the
+  /// last and keeps it alive for the whole session. Without an explicit reset,
+  /// a half-filled form from an hour ago is still on screen the next time the
+  /// patient opens the flow. Called when the New Request destination is left
+  /// and when the bottom tray's "+" is tapped (see `patient_nav_provider.dart`
+  /// and `patient_main_navigation_wrapper.dart`).
+  ///
+  /// [address] is deliberately preserved. It isn't an answer given on this
+  /// form — it's hydrated from the patient's saved-address book by a
+  /// `ref.listen` on `savedAddressesProvider`, which only fires when that
+  /// provider *emits*. Clearing it here would leave the location card empty
+  /// with nothing left to re-fill it, and the patient would have to re-pick a
+  /// saved address at checkout on every booking.
+  void resetBookingForm() {
+    state = NewRequestState.initial().copyWith(address: state.address);
+  }
+
   // ------------------------------------------------------------------ helpers
+
+  /// The clinical note, with the clinician's entrance instructions appended.
+  ///
+  /// Attached documents are NOT mirrored here — they're a structured field
+  /// the admin review surfaces render as openable chips, and a filename in
+  /// prose would only duplicate that.
+  String _buildConditionNote() {
+    final buf = StringBuffer(state.notes.trim());
+    final landmark = state.address.landmark?.trim() ?? '';
+    if (landmark.isNotEmpty) {
+      if (buf.isNotEmpty) buf.write('\n\n');
+      buf.write('Instructions for clinician: $landmark');
+    }
+    return buf.toString();
+  }
 
   String _buildPrefillNotes(ServiceCatalogItem item) {
     final buf = StringBuffer('Requesting: ${item.title}');

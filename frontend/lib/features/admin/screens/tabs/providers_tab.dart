@@ -9,6 +9,7 @@ import '../../../../core/theme/mt_text_styles.dart';
 import '../../../../core/widgets/initials_avatar.dart';
 import '../../../../core/widgets/mt_error_state.dart';
 import '../../../auth/auth_provider.dart';
+import '../../admin_nav.dart';
 import '../../admin_providers.dart';
 import '../add_provider_screen.dart';
 import 'admin_table_chrome.dart';
@@ -16,7 +17,90 @@ import 'admin_table_chrome.dart';
 final _feeFmt = NumberFormat('#,###', 'en_US');
 
 class ProvidersTab extends ConsumerWidget {
-  const ProvidersTab({super.key});
+  /// Which slice of the directory to show. The Providers hub drives this
+  /// from its pill strip; the credential-review slice is handled by
+  /// [ProviderVerificationTab] instead, since reviewing needs the full
+  /// registration detail a table row can't carry.
+  final ProvidersFilter filter;
+
+  /// Suppress the screen's own heading when mounted inside the hub, which
+  /// already renders a title above the pill strip.
+  final bool embedded;
+
+  const ProvidersTab({
+    super.key,
+    this.filter = ProvidersFilter.all,
+    this.embedded = false,
+  });
+
+  List<DoctorProfile> _applyFilter(List<DoctorProfile> rows) =>
+      switch (filter) {
+        ProvidersFilter.all => rows,
+        ProvidersFilter.pending =>
+          rows.where((p) => !p.isVerified && !p.isSuspended).toList(),
+        ProvidersFilter.active =>
+          rows.where((p) => p.isVerified && !p.isSuspended).toList(),
+        ProvidersFilter.suspended =>
+          rows.where((p) => p.isSuspended).toList(),
+      };
+
+  /// Suspend / reinstate. Sends the target state explicitly rather than a
+  /// toggle so a stale table row can't flip the wrong way.
+  Future<void> _onToggleSuspend(
+    BuildContext context,
+    WidgetRef ref,
+    DoctorProfile provider,
+  ) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final suspending = !provider.isSuspended;
+    if (suspending) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(16),
+          ),
+          title: Text('Suspend ${provider.fullName}?',
+              style: MtTextStyles.h3),
+          content: Text(
+            'They keep their credentials and verified badge, but are taken '
+            'offline and withheld from dispatch until reinstated.',
+            style: MtTextStyles.bodyMd.copyWith(color: MtColors.ink2),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: Text('Cancel', style: MtTextStyles.labelMd),
+            ),
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              style: TextButton.styleFrom(foregroundColor: MtColors.rejected),
+              child: Text('Suspend', style: MtTextStyles.labelMd),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+    }
+    try {
+      await ref
+          .read(dioClientProvider)
+          .setProviderStatus(provider.id, suspended: suspending);
+      ref.invalidate(adminProvidersListProvider);
+      messenger.showSnackBar(SnackBar(
+        content: Text(
+          suspending
+              ? '${provider.fullName} is now SUSPENDED.'
+              : '${provider.fullName} has been reinstated.',
+        ),
+        backgroundColor: suspending ? MtColors.rejected : MtColors.completed,
+      ));
+    } catch (e) {
+      messenger.showSnackBar(
+        SnackBar(content: Text('Could not update account status: $e')),
+      );
+    }
+  }
 
   Future<void> _onEdit(
     BuildContext context,
@@ -88,14 +172,7 @@ class ProvidersTab extends ConsumerWidget {
       }
     });
 
-    return AdminListScaffold(
-      title: 'Providers',
-      subtitle: 'Doctors and nurses available for dispatch',
-      onRefresh: () async {
-        ref.invalidate(adminProvidersListProvider);
-        await ref.read(adminProvidersListProvider.future);
-      },
-      child: Stack(
+    final content = Stack(
         children: [
           Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -136,18 +213,31 @@ class ProvidersTab extends ConsumerWidget {
                   message: e.toString(),
                   onRetry: () => ref.invalidate(adminProvidersListProvider),
                 ),
-                data: (rows) => rows.isEmpty
-                    ? const AdminEmptyState(
-                        icon: Icons.local_hospital_outlined,
-                        title: 'No providers yet',
-                        subtitle:
-                            'Tap "Add doctor / nurse" above to mint the first provider account.',
-                      )
-                    : _ProvidersTable(
-                        rows: rows,
-                        onEdit: (p) => _onEdit(context, ref, p),
-                        onToggleVerify: (p) => _onToggleVerify(context, ref, p),
-                      ),
+                data: (all) {
+                  if (all.isEmpty) {
+                    return const AdminEmptyState(
+                      icon: Icons.local_hospital_outlined,
+                      title: 'No providers yet',
+                      subtitle:
+                          'Tap "Add doctor / nurse" above to mint the first provider account.',
+                    );
+                  }
+                  final rows = _applyFilter(all);
+                  if (rows.isEmpty) {
+                    return AdminEmptyState(
+                      icon: Icons.filter_alt_off_outlined,
+                      title: 'No ${filter.label.toLowerCase()} providers',
+                      subtitle:
+                          'No provider currently matches this filter. Pick another pill above.',
+                    );
+                  }
+                  return _ProvidersTable(
+                    rows: rows,
+                    onEdit: (p) => _onEdit(context, ref, p),
+                    onToggleVerify: (p) => _onToggleVerify(context, ref, p),
+                    onToggleSuspend: (p) => _onToggleSuspend(context, ref, p),
+                  );
+                },
               ),
             ],
           ),
@@ -157,7 +247,23 @@ class ProvidersTab extends ConsumerWidget {
           if (editState.isLoading && editState.dispatch == null)
             const Positioned.fill(child: _LoadingBarrier()),
         ],
-      ),
+    );
+
+    if (embedded) {
+      return SingleChildScrollView(
+        padding: const EdgeInsets.fromLTRB(32, 24, 32, 32),
+        child: content,
+      );
+    }
+
+    return AdminListScaffold(
+      title: 'Providers',
+      subtitle: 'Doctors and nurses available for dispatch',
+      onRefresh: () async {
+        ref.invalidate(adminProvidersListProvider);
+        await ref.read(adminProvidersListProvider.future);
+      },
+      child: content,
     );
   }
 }
@@ -212,10 +318,12 @@ class _ProvidersTable extends StatelessWidget {
   final List<DoctorProfile> rows;
   final ValueChanged<DoctorProfile> onEdit;
   final ValueChanged<DoctorProfile> onToggleVerify;
+  final ValueChanged<DoctorProfile> onToggleSuspend;
   const _ProvidersTable({
     required this.rows,
     required this.onEdit,
     required this.onToggleVerify,
+    required this.onToggleSuspend,
   });
 
   @override
@@ -238,6 +346,7 @@ class _ProvidersTable extends StatelessWidget {
             DataColumn(label: Text('SPECIALIZATION')),
             DataColumn(label: Text('FEE'), numeric: true),
             DataColumn(label: Text('VERIFIED')),
+            DataColumn(label: Text('ACCOUNT')),
             DataColumn(label: Text('AVAILABILITY')),
             DataColumn(label: Text('JOINED')),
             DataColumn(label: Text('EDIT')),
@@ -264,6 +373,13 @@ class _ProvidersTable extends StatelessWidget {
                       : MtColors.pendingBg,
                 )),
                 DataCell(_StatusPill(
+                  label: p.isSuspended ? 'SUSPENDED' : 'ACTIVE',
+                  fg: p.isSuspended ? MtColors.rejected : MtColors.completed,
+                  bg: p.isSuspended
+                      ? MtColors.rejectedBg
+                      : MtColors.completedBg,
+                )),
+                DataCell(_StatusPill(
                   label: p.availabilityStatus.toUpperCase(),
                   fg: p.isOnline ? MtColors.completed : MtColors.ink3,
                   bg: p.isOnline ? MtColors.completedBg : MtColors.bg,
@@ -284,6 +400,7 @@ class _ProvidersTable extends StatelessWidget {
                     onSelected: (value) {
                       if (value == 'edit') onEdit(p);
                       if (value == 'verify') onToggleVerify(p);
+                      if (value == 'suspend') onToggleSuspend(p);
                     },
                     itemBuilder: (_) => [
                       PopupMenuItem<String>(
@@ -317,6 +434,30 @@ class _ProvidersTable extends StatelessWidget {
                               p.isVerified
                                   ? 'Set to Pending'
                                   : 'Mark Verified',
+                              style: MtTextStyles.labelMd
+                                  .copyWith(color: MtColors.ink),
+                            ),
+                          ],
+                        ),
+                      ),
+                      PopupMenuItem<String>(
+                        value: 'suspend',
+                        child: Row(
+                          children: [
+                            Icon(
+                              p.isSuspended
+                                  ? Icons.play_circle_outline
+                                  : Icons.block_outlined,
+                              size: 18,
+                              color: p.isSuspended
+                                  ? MtColors.completed
+                                  : MtColors.rejected,
+                            ),
+                            const SizedBox(width: 10),
+                            Text(
+                              p.isSuspended
+                                  ? 'Reinstate account'
+                                  : 'Suspend account',
                               style: MtTextStyles.labelMd
                                   .copyWith(color: MtColors.ink),
                             ),

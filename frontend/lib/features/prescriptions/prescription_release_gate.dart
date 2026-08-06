@@ -138,10 +138,8 @@ class PrescriptionReleaseGateCard extends StatelessWidget {
               ),
               const SizedBox(height: 10),
               Text(
-                "Settle your booking's outstanding service balance. After "
-                'payment, a Taafi admin verifies the prescription before '
-                'it unlocks — you will be notified the moment it is '
-                'released.',
+                'Your prescription will be available once payment is '
+                'confirmed by your doctor (cash) or admin (online).',
                 textAlign: TextAlign.center,
                 style: MtTextStyles.bodySm.copyWith(color: MtColors.ink3),
               ),

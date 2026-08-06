@@ -6,6 +6,7 @@ import '../../../../core/models/provider_wallet.dart';
 import '../../../../core/theme/mt_colors.dart';
 import '../../../../core/theme/mt_text_styles.dart';
 import '../../../../core/widgets/mt_error_state.dart';
+import '../../admin_nav.dart';
 import '../../admin_providers.dart';
 import 'admin_table_chrome.dart';
 
@@ -28,11 +29,7 @@ final _requestedFmt = DateFormat('MMM d, y · h:mm a');
 /// this one and already does the job. This page links across to it rather
 /// than duplicating that table.
 class AdminFinancePage extends ConsumerWidget {
-  /// Navigates the console to another tab index. Used for the cross-link to
-  /// Cash Clearance (tab 14).
-  final void Function(int index)? onNavigateTab;
-
-  const AdminFinancePage({super.key, this.onNavigateTab});
+  const AdminFinancePage({super.key});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -51,8 +48,7 @@ class AdminFinancePage extends ConsumerWidget {
           message: e.toString(),
           onRetry: () => ref.read(payoutRequestsProvider.notifier).refresh(),
         ),
-        data: (queue) =>
-            _PayoutsView(queue: queue, onNavigateTab: onNavigateTab),
+        data: (queue) => _PayoutsView(queue: queue),
       ),
     );
   }
@@ -60,9 +56,8 @@ class AdminFinancePage extends ConsumerWidget {
 
 class _PayoutsView extends StatelessWidget {
   final PayoutQueue queue;
-  final void Function(int index)? onNavigateTab;
 
-  const _PayoutsView({required this.queue, this.onNavigateTab});
+  const _PayoutsView({required this.queue});
 
   @override
   Widget build(BuildContext context) {
@@ -91,7 +86,7 @@ class _PayoutsView extends StatelessWidget {
             ),
             const SizedBox(width: 12),
             Expanded(
-              child: _CashClearanceLink(onNavigateTab: onNavigateTab),
+              child: const _CashClearanceLink(),
             ),
           ],
         ),
@@ -124,15 +119,15 @@ class _PayoutsView extends StatelessWidget {
 /// Cross-link tile to the pre-existing Cash Clearance terminal (tab 14), so
 /// the finance desk reads as one place even though it is two screens.
 class _CashClearanceLink extends ConsumerWidget {
-  final void Function(int index)? onNavigateTab;
-  const _CashClearanceLink({this.onNavigateTab});
+  const _CashClearanceLink();
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final cash = ref.watch(cashInHandProvider).valueOrNull;
     final outstanding = cash?.totalCashInField ?? 0;
     return InkWell(
-      onTap: onNavigateTab == null ? null : () => onNavigateTab!(14),
+      onTap: () => ref.read(financeTabProvider.notifier).state =
+          FinanceTab.cashClearance,
       borderRadius: BorderRadius.circular(12),
       child: Container(
         padding: const EdgeInsets.all(20),

@@ -1,5 +1,6 @@
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_svg/flutter_svg.dart';
 
 import '../../../../core/models/service_category.dart';
 import '../../../../core/theme/mt_text_styles.dart';
@@ -267,6 +268,19 @@ class CareCardImageFallback extends StatelessWidget {
   }
 }
 
+/// True for an SVG source.
+///
+/// [CachedNetworkImage] decodes raster formats only and would send a vector
+/// straight to the error widget, so SVGs — which is what an admin naturally
+/// reaches for when uploading a service icon — need their own branch.
+///
+/// Matched on the URL *path*, so a `?v=2` cache-buster can't hide the
+/// extension and push a valid icon onto the raster decoder.
+bool isSvgUrl(String url) {
+  final path = Uri.tryParse(url)?.path ?? url;
+  return path.toLowerCase().endsWith('.svg');
+}
+
 /// A card photo with the shared gradient placeholder / error treatment.
 /// Sized by its parent — pass it a bounded box or a [Stack] with
 /// `fit: StackFit.expand`.
@@ -281,6 +295,16 @@ class CareCardImage extends StatelessWidget {
     final u = url;
     if (u == null || u.isEmpty) {
       return CareCardImageFallback(icon: fallbackIcon);
+    }
+    if (isSvgUrl(u)) {
+      return SvgPicture.network(
+        u,
+        fit: BoxFit.cover,
+        placeholderBuilder: (_) => const CareCardImageFallback(),
+        // Keeps a broken vector on the same gradient tile a broken photo gets,
+        // rather than flutter_svg's own error rendering.
+        errorBuilder: (_, _, _) => CareCardImageFallback(icon: fallbackIcon),
+      );
     }
     return CachedNetworkImage(
       imageUrl: u,

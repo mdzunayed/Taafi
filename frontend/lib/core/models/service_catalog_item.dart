@@ -11,6 +11,25 @@ class ServiceCatalogItem extends Equatable {
   final String description;
   final String category;
 
+  /// The Home pills an admin has explicitly assigned this service to. Empty
+  /// means "never assigned", and the legacy [category] fold still decides where
+  /// it appears — see `resolveCategorySlugs` in the API for the exact rule.
+  final List<String> categoryIds;
+
+  /// Server-resolved read-only mirror of [categoryIds]: the slugs the patient
+  /// rail actually filters on, already folded through the legacy alias table
+  /// for a service that was never explicitly assigned.
+  final List<String> categorySlugs;
+
+  /// Admin toggle — can this be booked as an urgent/same-day visit? Backs the
+  /// "Urgent" sub-filter on the patient category view.
+  final bool isUrgentAvailable;
+
+  /// Average patient rating and its review count, both computed by the API
+  /// from real booking feedback. `0` / `0` = nobody has rated it yet.
+  final double rating;
+  final int ratingCount;
+
   /// Who attends this service — the role every booking made from it inherits,
   /// and therefore what the patient's tracker calls them ("Nurse On the Way"
   /// vs "Doctor On the Way").
@@ -38,6 +57,11 @@ class ServiceCatalogItem extends Equatable {
     required this.price,
     this.description = '',
     this.category = '',
+    this.categoryIds = const [],
+    this.categorySlugs = const [],
+    this.isUrgentAvailable = false,
+    this.rating = 0,
+    this.ratingCount = 0,
     this.providerType,
     this.providerTypeSource = 'none',
     this.duration,
@@ -55,6 +79,11 @@ class ServiceCatalogItem extends Equatable {
     double? price,
     String? description,
     String? category,
+    List<String>? categoryIds,
+    List<String>? categorySlugs,
+    bool? isUrgentAvailable,
+    double? rating,
+    int? ratingCount,
     ProviderType? providerType,
     String? providerTypeSource,
     String? duration,
@@ -69,6 +98,11 @@ class ServiceCatalogItem extends Equatable {
       price: price ?? this.price,
       description: description ?? this.description,
       category: category ?? this.category,
+      categoryIds: categoryIds ?? this.categoryIds,
+      categorySlugs: categorySlugs ?? this.categorySlugs,
+      isUrgentAvailable: isUrgentAvailable ?? this.isUrgentAvailable,
+      rating: rating ?? this.rating,
+      ratingCount: ratingCount ?? this.ratingCount,
       providerType: providerType ?? this.providerType,
       providerTypeSource: providerTypeSource ?? this.providerTypeSource,
       duration: duration ?? this.duration,
@@ -97,6 +131,12 @@ class ServiceCatalogItem extends Equatable {
       price: _price(json['price']),
       description: _str(json['description']),
       category: _str(json['category']),
+      categoryIds: _strList(json['categoryIds'] ?? json['category_ids']),
+      categorySlugs: _strList(json['categorySlugs'] ?? json['category_slugs']),
+      isUrgentAvailable:
+          (json['isUrgentAvailable'] ?? json['is_urgent_available']) == true,
+      rating: _price(json['rating']),
+      ratingCount: _count(json['ratingCount'] ?? json['rating_count']),
       providerType: ProviderTypeX.tryFromWire(_nullableStr(json['provider_type'])),
       providerTypeSource: _str(json['provider_type_source'], fallback: 'none'),
       duration: _nullableStr(json['duration']),
@@ -120,6 +160,29 @@ class ServiceCatalogItem extends Equatable {
   static String? _nullableStr(dynamic raw) {
     final s = _str(raw);
     return s.isEmpty ? null : s;
+  }
+
+  /// A JSON array of ids/slugs → a de-duplicated `List<String>`. Anything that
+  /// isn't a list (absent on an older backend, a stray scalar) reads as empty,
+  /// which the callers treat as "never assigned" rather than as a failure.
+  static List<String> _strList(dynamic raw) {
+    if (raw is! Iterable) return const [];
+    final out = <String>[];
+    for (final entry in raw) {
+      final s = _str(entry);
+      if (s.isNotEmpty && !out.contains(s)) out.add(s);
+    }
+    return List.unmodifiable(out);
+  }
+
+  /// Non-negative review count; unparseable or negative reads as 0 (unrated).
+  static int _count(dynamic raw) {
+    if (raw is num) {
+      final n = raw.toInt();
+      return n > 0 ? n : 0;
+    }
+    final parsed = int.tryParse(_str(raw)) ?? 0;
+    return parsed > 0 ? parsed : 0;
   }
 
   /// Price arrives as a `Number` from Mongo, but seed scripts and multipart
@@ -174,6 +237,11 @@ class ServiceCatalogItem extends Equatable {
         price,
         description,
         category,
+        categoryIds,
+        categorySlugs,
+        isUrgentAvailable,
+        rating,
+        ratingCount,
         providerType,
         providerTypeSource,
         duration,

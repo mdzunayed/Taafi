@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../../../core/api/platform_pricing_provider.dart';
 import '../../../../core/models/admin_settings.dart';
 import '../../../../core/theme/mt_colors.dart';
 import '../../../../core/theme/mt_text_styles.dart';
@@ -43,6 +45,21 @@ class _SettingsNotifier extends AsyncNotifier<AdminSettings> {
       _update(_current.copyWith(operationalHours: h));
   Future<void> setSystemNotification(String s) =>
       _update(_current.copyWith(systemNotification: s));
+
+  /// Retunes the deposit charged to confirm a NEW booking. Bookings already
+  /// awaiting payment keep the amount they were quoted — the backend stamps it
+  /// at creation — so this can never re-price one in flight.
+  Future<void> setBookingDeposit(double v) async {
+    await _update(_current.copyWith(bookingDepositAmount: v));
+    // The patient app ships in this same binary, so its cached config has to
+    // be dropped or the admin flips tabs and still sees the old number.
+    ref.invalidate(platformPricingProvider);
+  }
+
+  Future<void> setCommissionPercent(double v) =>
+      _update(_current.copyWith(platformCommissionPercent: v));
+  Future<void> setCashInHandLimit(double v) =>
+      _update(_current.copyWith(cashInHandLimit: v));
 }
 
 final _settingsProvider =
@@ -101,6 +118,13 @@ class SettingsTab extends ConsumerWidget {
             _OperationalHoursSection(
               hours: v.operationalHours,
               onChanged: notifier.setOperationalHours,
+            ),
+            const SizedBox(height: 18),
+            _FinanceSection(
+              settings: v,
+              onDepositChanged: notifier.setBookingDeposit,
+              onCommissionChanged: notifier.setCommissionPercent,
+              onCashLimitChanged: notifier.setCashInHandLimit,
             ),
             const SizedBox(height: 18),
             _SystemNoticeSection(
@@ -411,6 +435,212 @@ class _SystemNoticeSectionState extends State<_SystemNoticeSection> {
           ],
         ),
       ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Finance
+// ---------------------------------------------------------------------------
+
+/// The platform's three money knobs.
+///
+/// Each field owns its own dirty state and its own Save, rather than one Save
+/// for the section: `_SettingsNotifier._update` rolls the WHOLE document back
+/// when the server rejects a write, so batching them would let a bad commission
+/// value discard a good deposit edit the admin made in the same breath.
+class _FinanceSection extends StatelessWidget {
+  final AdminSettings settings;
+  final ValueChanged<double> onDepositChanged;
+  final ValueChanged<double> onCommissionChanged;
+  final ValueChanged<double> onCashLimitChanged;
+
+  const _FinanceSection({
+    required this.settings,
+    required this.onDepositChanged,
+    required this.onCommissionChanged,
+    required this.onCashLimitChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return AdminCard(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(20, 18, 20, 18),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('FINANCE',
+                style: MtTextStyles.labelSm
+                    .copyWith(color: MtColors.ink3, letterSpacing: 0.9)),
+            const SizedBox(height: 6),
+            Text(
+              'Platform-wide pricing. Changes apply to new activity only — '
+              'money already committed keeps the figures it was booked at.',
+              style: MtTextStyles.bodySm.copyWith(color: MtColors.ink3),
+            ),
+            const SizedBox(height: 16),
+            _MoneyFieldTile(
+              label: 'Default Care Request Deposit Fee (৳)',
+              // States the immutability contract where the admin is about to
+              // rely on it. Without this line, retuning the fee looks like it
+              // should also move every unpaid booking — it deliberately does not.
+              helper: 'Charged to confirm a new booking. Bookings already '
+                  'awaiting payment keep the fee they were quoted.',
+              value: settings.bookingDepositAmount,
+              min: 1,
+              max: 100000,
+              onSave: onDepositChanged,
+            ),
+            const Divider(height: 28, color: MtColors.line),
+            _MoneyFieldTile(
+              label: 'Platform commission (%)',
+              helper: 'Taafi\'s cut of each completed visit. Snapshotted onto '
+                  'every settlement, so visits already paid out are unaffected.',
+              value: settings.platformCommissionPercent,
+              min: 0,
+              max: 100,
+              onSave: onCommissionChanged,
+            ),
+            const Divider(height: 28, color: MtColors.line),
+            _MoneyFieldTile(
+              label: 'Provider cash-in-hand limit (৳)',
+              helper: 'Un-remitted cash a provider may hold before their '
+                  'payouts lock until a handover is recorded.',
+              value: settings.cashInHandLimit,
+              min: 0,
+              max: 1000000,
+              onSave: onCashLimitChanged,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A single numeric setting: label, helper, inline-validated field, and a Save
+/// that only lights up once the value both changed and is valid.
+///
+/// Bounds mirror the backend schema validators, so the common mistake is caught
+/// before the round trip rather than coming back as a rejected save.
+class _MoneyFieldTile extends StatefulWidget {
+  final String label;
+  final String helper;
+  final double value;
+  final double min;
+  final double max;
+  final ValueChanged<double> onSave;
+
+  const _MoneyFieldTile({
+    required this.label,
+    required this.helper,
+    required this.value,
+    required this.min,
+    required this.max,
+    required this.onSave,
+  });
+
+  @override
+  State<_MoneyFieldTile> createState() => _MoneyFieldTileState();
+}
+
+class _MoneyFieldTileState extends State<_MoneyFieldTile> {
+  late final TextEditingController _ctrl;
+
+  /// Trailing ".0" is noise on whole-taka amounts, which is nearly all of them.
+  static String _fmt(double v) =>
+      v == v.roundToDouble() ? v.toStringAsFixed(0) : v.toString();
+
+  @override
+  void initState() {
+    super.initState();
+    _ctrl = TextEditingController(text: _fmt(widget.value));
+  }
+
+  @override
+  void didUpdateWidget(covariant _MoneyFieldTile old) {
+    super.didUpdateWidget(old);
+    // Adopt a new server value only if the admin hasn't started editing — the
+    // same guard `_SystemNoticeSection` uses, so a refresh landing mid-typing
+    // never overwrites what they are in the middle of entering.
+    if (old.value != widget.value && _ctrl.text == _fmt(old.value)) {
+      _ctrl.text = _fmt(widget.value);
+    }
+  }
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  double? get _parsed => double.tryParse(_ctrl.text.trim());
+
+  String? get _error {
+    final n = _parsed;
+    if (n == null) return 'Enter a number';
+    if (n < widget.min || n > widget.max) {
+      return 'Must be between ${_fmt(widget.min)} and ${_fmt(widget.max)}';
+    }
+    return null;
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final err = _error;
+    final dirty = _parsed != null && _parsed != widget.value;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(widget.label,
+            style: MtTextStyles.labelMd.copyWith(color: MtColors.ink)),
+        const SizedBox(height: 4),
+        Text(widget.helper,
+            style: MtTextStyles.bodySm.copyWith(color: MtColors.ink3)),
+        const SizedBox(height: 10),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            SizedBox(
+              width: 160,
+              child: TextField(
+                controller: _ctrl,
+                keyboardType:
+                    const TextInputType.numberWithOptions(decimal: true),
+                inputFormatters: [
+                  FilteringTextInputFormatter.allow(RegExp(r'[0-9.]')),
+                ],
+                onChanged: (_) => setState(() {}),
+                decoration: InputDecoration(
+                  isDense: true,
+                  errorText: dirty ? err : null,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(width: 12),
+            ElevatedButton.icon(
+              onPressed: dirty && err == null
+                  ? () {
+                      widget.onSave(_parsed!);
+                      FocusScope.of(context).unfocus();
+                    }
+                  : null,
+              icon: const Icon(Icons.save_outlined, size: 16),
+              label: Text('Save',
+                  style: MtTextStyles.labelMd.copyWith(color: Colors.white)),
+              style: ElevatedButton.styleFrom(
+                backgroundColor: MtColors.brand,
+                foregroundColor: Colors.white,
+                disabledBackgroundColor: MtColors.ink3.withValues(alpha: 0.3),
+              ),
+            ),
+          ],
+        ),
+      ],
     );
   }
 }

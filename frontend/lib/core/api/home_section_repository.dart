@@ -141,6 +141,44 @@ class HomeSectionRepository {
     }
   }
 
+  /// Switches how a section arranges its cards.
+  ///
+  /// Separate from [update] so changing a layout can't clobber `contentData`
+  /// from a stale editor — the same reasoning as [setStatus].
+  Future<void> setLayout(String id, HomeLayoutType layoutType) async {
+    try {
+      await _dio.patch(
+        '/api/home-sections/$id/layout',
+        data: {'layoutType': layoutType.wire},
+      );
+      await refresh();
+    } on DioException {
+      rethrow;
+    }
+  }
+
+  /// Sets the Care Services layout, creating the reserved `CARE_SERVICES`
+  /// section if this deployment doesn't have one yet.
+  ///
+  /// Care Services predates the CMS — it has always rendered the live catalog
+  /// — so on an existing install there is no document to [setLayout] onto.
+  /// Rather than make an operator hand-create a section with a magic key
+  /// before the layout selector does anything, the backend upserts it. See
+  /// `PUT /api/home-sections/care-services`.
+  Future<HomeSection> setCareServicesLayout(HomeLayoutType layoutType) async {
+    try {
+      final res = await _dio.put<Map<String, dynamic>>(
+        '/api/home-sections/care-services',
+        data: {'layoutType': layoutType.wire},
+      );
+      final saved = HomeSection.fromJson(res.data!);
+      await refresh();
+      return saved;
+    } on DioException {
+      rethrow;
+    }
+  }
+
   /// Persists a new section order — [ids] is the full list of section ids in
   /// their desired top-to-bottom sequence; the backend renumbers
   /// `orderIndex` to match (0..n-1).

@@ -121,6 +121,48 @@ class SectionStyleTokens extends Equatable {
       [titleColorLight, titleColorDark, sectionBackgroundColor];
 }
 
+/// How a section arranges its cards. Mirrors the backend
+/// `DynamicSection.layoutType` enum.
+///
+/// Orthogonal to [HomeSection.uiTemplate], which says what a *card* looks
+/// like; this says how the cards are arranged. Only the reserved
+/// `CARE_SERVICES` section reads it today — its renderer is the adaptive
+/// layout engine in `care_services_section.dart` — and it is what the admin's
+/// layout selector writes.
+enum HomeLayoutType { grid2Col, carousel, list }
+
+extension HomeLayoutTypeX on HomeLayoutType {
+  String get wire => switch (this) {
+        HomeLayoutType.grid2Col => 'GRID_2_COL',
+        HomeLayoutType.carousel => 'CAROUSEL',
+        HomeLayoutType.list => 'LIST',
+      };
+
+  /// Admin-facing name in the CMS layout selector.
+  String get label => switch (this) {
+        HomeLayoutType.grid2Col => '2-column grid',
+        HomeLayoutType.carousel => 'Horizontal carousel',
+        HomeLayoutType.list => 'Full-width list',
+      };
+
+  /// One-line description under the label in the selector.
+  String get description => switch (this) {
+        HomeLayoutType.grid2Col => 'Side-by-side card grid, two per row.',
+        HomeLayoutType.carousel => 'Swipeable horizontal card rail.',
+        HomeLayoutType.list => 'Vertical stack of full-width rows.',
+      };
+
+  /// An unknown wire value falls back to the carousel — the layout Care
+  /// Services rendered before it was configurable, so a backend that ships a
+  /// fourth layout before the app knows it degrades to today's screen rather
+  /// than to an empty one.
+  static HomeLayoutType fromWire(String? raw) => switch (raw) {
+        'GRID_2_COL' => HomeLayoutType.grid2Col,
+        'LIST' => HomeLayoutType.list,
+        _ => HomeLayoutType.carousel,
+      };
+}
+
 /// What a tap on a [HomeSectionItem] does. Mirrors the backend
 /// `contentData[].targetType` enum (and [BannerActionType]'s role for promo
 /// banners): only the field matching the type carries a value.
@@ -200,8 +242,35 @@ class HomeSectionItem extends Equatable {
   final String itemId;
   final String title;
   final String? subtitle;
+
+  /// Bengali counterparts of [title] / [subtitle]. The app has no locale
+  /// switch, so these render as a secondary line beside the English text
+  /// (matching the section title); null ⇒ English alone.
+  final String? titleBn;
+  final String? subtitleBn;
+
   final String imageUrl;
   final String? priceTag;
+
+  /// The capsule floating on the card image ("Popular", "New").
+  ///
+  /// Cards saved before this field existed have none, and the renderer falls
+  /// back to [subtitle] for them — which is what that slot used to hold. Read
+  /// [badgeLabel] / [descriptionLine] rather than these two fields directly.
+  final String? badgeText;
+
+  /// Per-card visibility. The public feed already omits hidden cards, so this
+  /// is only ever false in the admin console.
+  final bool isActive;
+
+  /// Which Home filter pill this card belongs under; null ⇒ untagged, so the
+  /// card only appears under the implicit "All" pill.
+  final String? categoryId;
+
+  /// The tagged category's slug, resolved server-side. Null when untagged, or
+  /// when the tag points at a category that has since been deleted — the id
+  /// still round-trips so the CMS doesn't silently drop it on the next save.
+  final String? categorySlug;
 
   // --- Tap target -------------------------------------------------------
 
@@ -236,8 +305,14 @@ class HomeSectionItem extends Equatable {
     required this.itemId,
     required this.title,
     this.subtitle,
+    this.titleBn,
+    this.subtitleBn,
     required this.imageUrl,
     this.priceTag,
+    this.badgeText,
+    this.isActive = true,
+    this.categoryId,
+    this.categorySlug,
     this.targetType = HomeItemTargetType.none,
     this.serviceId,
     this.customRoute = '',
@@ -253,12 +328,51 @@ class HomeSectionItem extends Equatable {
       targetType == HomeItemTargetType.service &&
       (serviceId != null && serviceId!.isNotEmpty);
 
+  /// What belongs in the card's floating capsule.
+  ///
+  /// Falls back to [subtitle] because that is the slot the capsule used before
+  /// [badgeText] existed — without the fallback, every card saved under the old
+  /// CMS would silently lose its badge on upgrade.
+  String? get badgeLabel {
+    final badge = badgeText?.trim();
+    if (badge != null && badge.isNotEmpty) return badge;
+    return _blankToNull(subtitle);
+  }
+
+  /// What belongs on the card's description line: [subtitle], but only once
+  /// [badgeText] has claimed the capsule. On a legacy card [subtitle] is still
+  /// the badge, so this stays null and the card renders exactly as before.
+  String? get descriptionLine {
+    final badge = badgeText?.trim();
+    if (badge == null || badge.isEmpty) return null;
+    return _blankToNull(subtitle);
+  }
+
+  static String? _blankToNull(String? v) {
+    final s = v?.trim();
+    return (s == null || s.isEmpty) ? null : s;
+  }
+
+  /// Reads a reference field that may arrive as a bare id or a populated
+  /// object, returning the id either way. Blank ⇒ null (unset).
+  static String? _idOf(dynamic raw) {
+    if (raw == null) return null;
+    final id = raw is Map ? (raw['id'] ?? raw['_id'])?.toString() : raw.toString();
+    return (id == null || id.trim().isEmpty) ? null : id.trim();
+  }
+
   HomeSectionItem copyWith({
     String? itemId,
     String? title,
     String? subtitle,
+    String? titleBn,
+    String? subtitleBn,
     String? imageUrl,
     String? priceTag,
+    String? badgeText,
+    bool? isActive,
+    String? categoryId,
+    String? categorySlug,
     HomeItemTargetType? targetType,
     String? serviceId,
     String? customRoute,
@@ -271,8 +385,14 @@ class HomeSectionItem extends Equatable {
       itemId: itemId ?? this.itemId,
       title: title ?? this.title,
       subtitle: subtitle ?? this.subtitle,
+      titleBn: titleBn ?? this.titleBn,
+      subtitleBn: subtitleBn ?? this.subtitleBn,
       imageUrl: imageUrl ?? this.imageUrl,
       priceTag: priceTag ?? this.priceTag,
+      badgeText: badgeText ?? this.badgeText,
+      isActive: isActive ?? this.isActive,
+      categoryId: categoryId ?? this.categoryId,
+      categorySlug: categorySlug ?? this.categorySlug,
       targetType: targetType ?? this.targetType,
       serviceId: serviceId ?? this.serviceId,
       customRoute: customRoute ?? this.customRoute,
@@ -307,8 +427,19 @@ class HomeSectionItem extends Equatable {
       itemId: (json['itemId'] ?? '').toString(),
       title: (json['title'] ?? '') as String,
       subtitle: json['subtitle'] as String?,
+      titleBn: json['titleBn'] as String?,
+      subtitleBn: json['subtitleBn'] as String?,
       imageUrl: (json['imageUrl'] ?? '') as String,
       priceTag: json['priceTag'] as String?,
+      badgeText: json['badgeText'] as String?,
+      // Absent from a backend predating per-card visibility ⇒ visible.
+      isActive: json['isActive'] as bool? ?? true,
+      // The backend flattens `categoryId` to a plain id and puts the resolved
+      // snapshot on `category`; tolerate a populated object here too, the same
+      // way `serviceId` above does.
+      categoryId: _idOf(json['categoryId']),
+      categorySlug: (json['categorySlug'] as String?) ??
+          (json['category'] is Map ? json['category']['slug'] as String? : null),
       targetType: _resolveTargetType(json['targetType'] as String?, serviceId, route),
       serviceId: (serviceId != null && serviceId.isNotEmpty) ? serviceId : null,
       customRoute: (json['customRoute'] ?? '') as String,
@@ -347,8 +478,13 @@ class HomeSectionItem extends Equatable {
         'itemId': itemId,
         'title': title,
         'subtitle': subtitle,
+        'titleBn': titleBn,
+        'subtitleBn': subtitleBn,
         'imageUrl': imageUrl,
         'priceTag': priceTag,
+        'badgeText': badgeText,
+        'isActive': isActive,
+        'categoryId': categoryId,
         'targetType': targetType.wire,
         'serviceId': serviceId,
         'customRoute': customRoute,
@@ -364,8 +500,14 @@ class HomeSectionItem extends Equatable {
         itemId,
         title,
         subtitle,
+        titleBn,
+        subtitleBn,
         imageUrl,
         priceTag,
+        badgeText,
+        isActive,
+        categoryId,
+        categorySlug,
         targetType,
         serviceId,
         customRoute,
@@ -390,6 +532,10 @@ class HomeSection extends Equatable {
   final String? titleBn;
   final String uiTemplate;
 
+  /// How this section arranges its cards. Read by the Care Services block
+  /// only; the templated sections below it ignore it (see [HomeLayoutType]).
+  final HomeLayoutType layoutType;
+
   /// Ascending display order below the fixed blocks — lower shows first.
   final int orderIndex;
   final bool isActive;
@@ -405,12 +551,24 @@ class HomeSection extends Equatable {
     required this.titleEn,
     this.titleBn,
     required this.uiTemplate,
+    this.layoutType = HomeLayoutType.carousel,
     this.orderIndex = 0,
     this.isActive = true,
     this.contentData = const [],
     this.styleTokens,
     this.createdAt,
   });
+
+  /// The one `sectionKey` the app treats specially: it is the Care Services
+  /// block on Home, so its `layoutType` drives the adaptive layout engine and
+  /// the generic dynamic-sections renderer skips it (it would otherwise draw
+  /// the block a second time).
+  ///
+  /// MIRROR: `CARE_SERVICES_KEY` in backend/src/routes/homeSections.js.
+  static const String careServicesKey = 'CARE_SERVICES';
+
+  /// True for the reserved Care Services section.
+  bool get isCareServices => sectionKey == careServicesKey;
 
   static const templateHorizontalRoundAvatar = 'HORIZONTAL_ROUND_AVATAR';
   static const templateHorizontalProductCard = 'HORIZONTAL_PRODUCT_CARD';
@@ -431,6 +589,7 @@ class HomeSection extends Equatable {
     String? titleEn,
     String? titleBn,
     String? uiTemplate,
+    HomeLayoutType? layoutType,
     int? orderIndex,
     bool? isActive,
     List<HomeSectionItem>? contentData,
@@ -443,6 +602,7 @@ class HomeSection extends Equatable {
       titleEn: titleEn ?? this.titleEn,
       titleBn: titleBn ?? this.titleBn,
       uiTemplate: uiTemplate ?? this.uiTemplate,
+      layoutType: layoutType ?? this.layoutType,
       orderIndex: orderIndex ?? this.orderIndex,
       isActive: isActive ?? this.isActive,
       contentData: contentData ?? this.contentData,
@@ -470,6 +630,7 @@ class HomeSection extends Equatable {
       titleEn: (json['titleEn'] ?? '') as String,
       titleBn: json['titleBn'] as String?,
       uiTemplate: (json['uiTemplate'] ?? '') as String,
+      layoutType: HomeLayoutTypeX.fromWire(json['layoutType'] as String?),
       orderIndex: (json['orderIndex'] as num?)?.toInt() ?? 0,
       isActive: json['isActive'] as bool? ?? true,
       contentData: items,
@@ -484,6 +645,7 @@ class HomeSection extends Equatable {
         'titleEn': titleEn,
         'titleBn': titleBn,
         'uiTemplate': uiTemplate,
+        'layoutType': layoutType.wire,
         'orderIndex': orderIndex,
         'isActive': isActive,
         'contentData': contentData.map((e) => e.toJson()).toList(),
@@ -502,6 +664,7 @@ class HomeSection extends Equatable {
         titleEn,
         titleBn,
         uiTemplate,
+        layoutType,
         orderIndex,
         isActive,
         contentData,

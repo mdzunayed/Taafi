@@ -3,7 +3,9 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/models/dependent.dart';
+import '../../../core/models/request_document.dart';
 import '../../../core/models/service_catalog_item.dart';
+import '../checkout/booking_payment_method.dart';
 
 /// Whether the patient wants the visit dispatched immediately or scheduled.
 enum RequestTiming { asSoonAsPossible, scheduled }
@@ -76,47 +78,6 @@ class RequestAddress extends Equatable {
 }
 
 const _sentinel = Object();
-
-/// Attachment payload metadata. Wrapped so we can show a "filled" chip in the
-/// UI and so the notifier can swap mock values for real file paths later
-/// without touching the form layer.
-@immutable
-class RequestAttachments extends Equatable {
-  /// Path or filename of the discharge summary file.
-  final String? discharge;
-  /// Free-form summary line, e.g. "BP 120/80 · HR 78 · Temp 98.6°F".
-  final String? vitals;
-  /// Filename + duration label, e.g. "voice_note_0023s.m4a".
-  final String? voiceNote;
-
-  const RequestAttachments({
-    this.discharge,
-    this.vitals,
-    this.voiceNote,
-  });
-
-  static const empty = RequestAttachments();
-
-  RequestAttachments copyWith({
-    Object? discharge = _sentinel,
-    Object? vitals = _sentinel,
-    Object? voiceNote = _sentinel,
-  }) {
-    return RequestAttachments(
-      discharge: identical(discharge, _sentinel)
-          ? this.discharge
-          : discharge as String?,
-      vitals:
-          identical(vitals, _sentinel) ? this.vitals : vitals as String?,
-      voiceNote: identical(voiceNote, _sentinel)
-          ? this.voiceNote
-          : voiceNote as String?,
-    );
-  }
-
-  @override
-  List<Object?> get props => [discharge, vitals, voiceNote];
-}
 
 /// Who the booked visit is for. `null` on [NewRequestState.careRecipient]
 /// means the booking patient themselves ("Myself"); otherwise this is a saved
@@ -197,13 +158,24 @@ class NewRequestState extends Equatable {
   /// they'd otherwise have to re-answer. Cleared by `expandServiceSelection`.
   final bool servicePrefilled;
 
+  /// The online rail chosen for the booking deposit on the Checkout
+  /// step. `null` until the patient picks one, which is what blocks "Confirm
+  /// Booking". Never [BookingPaymentMethod.cashOnService] — the deposit is
+  /// online-only; cash is a choice for the remaining balance, made later,
+  /// once Care Management has set the fee.
+  final BookingPaymentMethod? paymentMethod;
+
   final RequestTiming timing;
   final DateTime? scheduledAt;
 
   final RequestAddress address;
 
   final String notes;
-  final RequestAttachments attachments;
+
+  /// Previous medical documents (PDFs / images) the patient attached on the
+  /// service step. Already uploaded — these are server-returned descriptors,
+  /// carried into the create payload as `documents`.
+  final List<RequestDocument> documents;
 
   /// Who the session is for. `null` = the booking patient ("Myself").
   final CareRecipient? careRecipient;
@@ -229,11 +201,12 @@ class NewRequestState extends Equatable {
   const NewRequestState({
     this.selectedService,
     this.servicePrefilled = false,
+    this.paymentMethod,
     this.timing = RequestTiming.asSoonAsPossible,
     this.scheduledAt,
     required this.address,
     this.notes = '',
-    this.attachments = RequestAttachments.empty,
+    this.documents = const [],
     this.careRecipient,
     this.promoCode,
     this.validationError,
@@ -256,11 +229,12 @@ class NewRequestState extends Equatable {
   NewRequestState copyWith({
     Object? selectedService = _sentinel,
     bool? servicePrefilled,
+    Object? paymentMethod = _sentinel,
     RequestTiming? timing,
     Object? scheduledAt = _sentinel,
     RequestAddress? address,
     String? notes,
-    RequestAttachments? attachments,
+    List<RequestDocument>? documents,
     Object? careRecipient = _sentinel,
     Object? promoCode = _sentinel,
     Object? validationError = _sentinel,
@@ -272,13 +246,16 @@ class NewRequestState extends Equatable {
           ? this.selectedService
           : selectedService as ServiceCatalogItem?,
       servicePrefilled: servicePrefilled ?? this.servicePrefilled,
+      paymentMethod: identical(paymentMethod, _sentinel)
+          ? this.paymentMethod
+          : paymentMethod as BookingPaymentMethod?,
       timing: timing ?? this.timing,
       scheduledAt: identical(scheduledAt, _sentinel)
           ? this.scheduledAt
           : scheduledAt as DateTime?,
       address: address ?? this.address,
       notes: notes ?? this.notes,
-      attachments: attachments ?? this.attachments,
+      documents: documents ?? this.documents,
       careRecipient: identical(careRecipient, _sentinel)
           ? this.careRecipient
           : careRecipient as CareRecipient?,
@@ -297,11 +274,12 @@ class NewRequestState extends Equatable {
   List<Object?> get props => [
         selectedService,
         servicePrefilled,
+        paymentMethod,
         timing,
         scheduledAt,
         address,
         notes,
-        attachments,
+        documents,
         careRecipient,
         promoCode,
         validationError,

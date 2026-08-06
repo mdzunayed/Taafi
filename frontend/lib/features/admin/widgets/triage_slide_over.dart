@@ -7,26 +7,22 @@ import '../../../core/theme/mt_colors.dart';
 import '../../../core/theme/mt_text_styles.dart';
 import '../../auth/auth_provider.dart';
 import '../admin_providers.dart';
-
-/// Fixed ৳100 slot-confirmation deposit. Deducted from the final bill so the
-/// outstanding balance shown in the drawer mirrors what the patient will owe
-/// after the visit completes (pay-after-service). Kept in lockstep with the
-/// backend `DEPOSIT_AMOUNT` constant in `routes/admin.js`.
-const double _kDepositAmount = 100;
+import 'patient_documents_card.dart';
 
 /// Dropdown sentinel for "price the booking but don't dispatch a provider
 /// yet". Distinct from a real provider key so we can branch the submit path
 /// onto the silent set-price endpoint instead of assign.
 const String _assignLaterKey = '__assign_later__';
 
-/// Frontend-normalized statuses (see `normalizeAdminStatus`) from which an
-/// admin can still price + assign a team. `deposit_paid_admin_reviewing` is
-/// the normal post-deposit triage state; `pending` (legacy `submitted`) and
-/// `approved` (legacy `approved`/`assigned`) remain re-priceable /
-/// re-assignable, matching the backend `ASSIGNABLE` guard.
+/// Frontend-normalized statuses (see `normalizeAdminStatus`) an admin can act
+/// on from this drawer. Covers both halves of the lifecycle the drawer serves:
+/// `pending` (a freshly submitted request awaiting its review call) and
+/// `deposit_required` are Phase 2; `deposit_paid_admin_reviewing` and
+/// `approved` are Phase 3, where a team may actually be dispatched.
 const Set<String> _triageableStatuses = {
-  'deposit_paid_admin_reviewing',
   'pending',
+  'deposit_required',
+  'deposit_paid_admin_reviewing',
   'approved',
 };
 
@@ -36,7 +32,7 @@ const Set<String> _triageableStatuses = {
 ///
 /// For bookings still in triage (deposit paid, awaiting review) it exposes an
 /// inline billing + assignment console: set the final service fee, watch the
-/// remaining balance auto-compute against the ৳100 deposit, pick an on-duty
+/// remaining balance auto-compute against the paid deposit, pick an on-duty
 /// doctor or nurse, and dispatch — all without leaving the drawer. The
 /// full-width dual-list match-maker is still one tap away via [onAssignTeam].
 ///
@@ -62,10 +58,15 @@ class TriageSlideOver extends ConsumerStatefulWidget {
 
 class _TriageSlideOverState extends ConsumerState<TriageSlideOver> {
   late final TextEditingController _feeController;
+  late final TextEditingController _depositController;
 
   /// Live parse of the fee field, used to drive the remaining-balance readout
   /// and gate the submit button as the admin types.
   double? _fee;
+
+  /// Live parse of the deposit field — the Phase-2 number the patient will be
+  /// asked to pay to confirm the visit.
+  double? _depositInput;
 
   /// Selected provider dropdown key: `doctor:<id>`, `nurse:<id>`, or
   /// [_assignLaterKey]. Defaults to assign-later so a price-only save is the
@@ -78,11 +79,27 @@ class _TriageSlideOverState extends ConsumerState<TriageSlideOver> {
 
   bool get _canTriage => _triageableStatuses.contains(request.status);
 
-  /// Whether a ৳100 deposit is actually on file — true for the post-deposit
-  /// review state. Legacy `pending`/`approved` rows predate the deposit gate.
-  bool get _hasDeposit => request.status == 'deposit_paid_admin_reviewing';
+  /// Whether a deposit has actually been COLLECTED. Derived from the MONEY on
+  /// the row, not from the status: sniffing `deposit_paid_admin_reviewing`
+  /// credited a flat ৳100 to any booking in that state regardless of what it
+  /// really paid, and credited nothing to a paid booking whose status had
+  /// moved on.
+  bool get _hasDeposit => _deposit > 0;
 
-  double get _deposit => _hasDeposit ? _kDepositAmount : 0;
+  /// Deducted from the final bill so the outstanding balance shown in the
+  /// drawer mirrors what the patient will owe after the visit completes. This
+  /// is the snapshotted PAID amount off the row — never the platform's
+  /// configured default, which would disagree with the backend's
+  /// `fee − deposit_amount − discount`.
+  double get _deposit => request.depositAmount;
+
+  /// PHASE 2 vs PHASE 3, and the single switch this whole drawer branches on.
+  ///
+  /// Before the deposit is collected the admin's job is to set the two numbers
+  /// and ask the patient for the deposit — no provider may be dispatched. Once
+  /// it clears, the job becomes assigning the team. Rendering both at once
+  /// would offer a dispatch the backend refuses.
+  bool get _isDepositPhase => !_hasDeposit;
 
   @override
   void initState() {
@@ -94,20 +111,34 @@ class _TriageSlideOverState extends ConsumerState<TriageSlideOver> {
     _feeController = TextEditingController(
       text: _fee == null ? '' : _trimAmount(_fee!),
     );
+    // Prefill the deposit with what this booking was already quoted, so
+    // reopening a booking mid-Phase-2 shows the standing quote rather than a
+    // blank field the admin might refill with a different number.
+    final quoted = request.requiredDeposit;
+    _depositInput = (quoted != null && quoted > 0) ? quoted : null;
+    _depositController = TextEditingController(
+      text: _depositInput == null ? '' : _trimAmount(_depositInput!),
+    );
   }
 
   @override
   void dispose() {
     _feeController.dispose();
+    _depositController.dispose();
     super.dispose();
   }
 
   static String _trimAmount(double v) =>
       v == v.roundToDouble() ? v.toStringAsFixed(0) : v.toString();
 
+  /// What the patient will owe AFTER their visit. Mirrors the backend's
+  /// `total_service_fee − deposit − discount`, crediting the deposit that
+  /// actually applies: the amount collected once there is one, otherwise the
+  /// amount currently being quoted.
   double get _remainingDue {
     final fee = _fee ?? 0;
-    final due = fee - _deposit;
+    final deposit = _hasDeposit ? _deposit : (_depositInput ?? 0);
+    final due = fee - deposit;
     return due < 0 ? 0 : due;
   }
 
@@ -125,8 +156,66 @@ class _TriageSlideOverState extends ConsumerState<TriageSlideOver> {
       );
       return;
     }
-    // Mirror the backend guard: fee must at least cover the deposit so the
-    // outstanding balance can never go negative.
+
+    // ── PHASE 2: commit the fee + deposit and ask the patient to pay ────────
+    if (_isDepositPhase) {
+      final deposit = _depositInput;
+      if (deposit == null || deposit <= 0) {
+        messenger.showSnackBar(
+          const SnackBar(
+            content: Text('Enter the advance deposit this booking must pay.'),
+            backgroundColor: MtColors.rejected,
+          ),
+        );
+        return;
+      }
+      // Mirror the backend guard: the deposit is part of the fee, not a
+      // surcharge on top of it, so it can never exceed the total.
+      if (deposit > fee) {
+        messenger.showSnackBar(
+          const SnackBar(
+            content: Text('The deposit cannot exceed the total service fee.'),
+            backgroundColor: MtColors.rejected,
+          ),
+        );
+        return;
+      }
+
+      setState(() => _submitting = true);
+      try {
+        await ref.read(dioClientProvider).adminSetBookingDeposit(
+              request.id,
+              totalServiceFee: fee,
+              requiredDeposit: deposit,
+            );
+        ref.invalidate(adminRequestsProvider);
+        if (!mounted) return;
+        Navigator.of(context).pop();
+        messenger.showSnackBar(
+          SnackBar(
+            content: Text(
+              'Deposit of ৳${_trimAmount(deposit)} requested for '
+              '${request.id} — the patient has been notified.',
+            ),
+            backgroundColor: MtColors.completed,
+          ),
+        );
+      } catch (e) {
+        if (!mounted) return;
+        setState(() => _submitting = false);
+        messenger.showSnackBar(
+          SnackBar(
+            content: Text('Could not set the deposit: $e'),
+            backgroundColor: MtColors.rejected,
+          ),
+        );
+      }
+      return;
+    }
+
+    // ── PHASE 3: the deposit is in — correct the fee and/or dispatch ────────
+    // Mirror the backend guard: the fee must at least cover the deposit
+    // already collected, so the outstanding balance can never go negative.
     if (fee < _deposit) {
       messenger.showSnackBar(
         SnackBar(
@@ -145,8 +234,8 @@ class _TriageSlideOverState extends ConsumerState<TriageSlideOver> {
     final dio = ref.read(dioClientProvider);
     try {
       if (assignLater) {
-        // Silent invoice update — no status change, no patient pay-prompt.
-        // The booking stays in review until a team is assigned.
+        // Silent invoice correction — no status change, no patient pay-prompt,
+        // and the standing deposit quote is left untouched.
         await dio.adminSetBookingPrice(request.id, finalServiceFee: fee);
       } else {
         final picked = _resolveSelectedProvider();
@@ -172,7 +261,7 @@ class _TriageSlideOverState extends ConsumerState<TriageSlideOver> {
         SnackBar(
           content: Text(
             assignLater
-                ? 'Fee saved for ${request.id} — booking still in review.'
+                ? 'Fee updated for ${request.id} — booking still in review.'
                 : 'Fee set & team assigned for ${request.id}.',
           ),
           backgroundColor: MtColors.completed,
@@ -486,6 +575,14 @@ class _TriageSlideOverState extends ConsumerState<TriageSlideOver> {
                       const SizedBox(height: 24),
                     ],
 
+                    // Sits directly above the fee + provider console below,
+                    // so the records inform the dispatch decision rather than
+                    // being found after it. Renders in every state — knowing
+                    // a closed booking HAD no documents is worth as much as
+                    // seeing the ones it did.
+                    PatientDocumentsCard(attachments: request.attachments),
+                    const SizedBox(height: 24),
+
                     // ── Inline billing + assignment console ────────────────
                     if (_canTriage) _buildTriageConsole(),
                   ],
@@ -512,8 +609,43 @@ class _TriageSlideOverState extends ConsumerState<TriageSlideOver> {
       children: [
         const Divider(color: MtColors.line, height: 1),
         const SizedBox(height: 20),
-        Text('SET FEE & ASSIGN', style: MtTextStyles.sectionLabel),
+        Text(
+          _isDepositPhase ? 'SET FEE & DEPOSIT' : 'CONFIRM FEE & ASSIGN',
+          style: MtTextStyles.sectionLabel,
+        ),
         const SizedBox(height: 12),
+
+        // Phase-2 instruction. The deposit is a clinical judgement made on a
+        // phone call, so the console says so rather than implying the number
+        // can be derived from the row.
+        if (_isDepositPhase) ...[
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: const Color(0xFFEFF6FF),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: const Color(0xFF93C5FD)),
+            ),
+            child: Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                const Icon(Icons.phone_in_talk_outlined,
+                    size: 18, color: Color(0xFF1D4ED8)),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    'This patient paid nothing to book. Call them to assess '
+                    'the case, then set the total fee and the advance deposit '
+                    'that confirms the visit. No provider can be dispatched '
+                    'until the deposit clears.',
+                    style: MtTextStyles.bodySm.copyWith(color: MtColors.ink2),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 16),
+        ],
 
         // Deposit confirmation chip.
         if (_hasDeposit) ...[
@@ -533,7 +665,7 @@ class _TriageSlideOverState extends ConsumerState<TriageSlideOver> {
                     size: 16, color: MtColors.completed),
                 const SizedBox(width: 6),
                 Text(
-                  '৳${_trimAmount(_kDepositAmount)} Deposit Confirmed',
+                  '৳${_trimAmount(_deposit)} Deposit Confirmed',
                   style: MtTextStyles.labelMd.copyWith(
                     color: MtColors.completed,
                     fontWeight: FontWeight.w700,
@@ -548,42 +680,33 @@ class _TriageSlideOverState extends ConsumerState<TriageSlideOver> {
         // Total service fee.
         Text('Total Service Fee', style: MtTextStyles.labelMd),
         const SizedBox(height: 6),
-        TextField(
+        _AmountField(
           controller: _feeController,
-          keyboardType:
-              const TextInputType.numberWithOptions(decimal: true),
-          inputFormatters: [
-            FilteringTextInputFormatter.allow(RegExp(r'[0-9.]')),
-            TextInputFormatter.withFunction((oldV, newV) =>
-                newV.text.split('.').length > 2 ? oldV : newV),
-          ],
-          onChanged: (raw) {
-            final parsed = double.tryParse(raw.trim());
-            setState(() {
-              _fee = (parsed == null || parsed <= 0) ? null : parsed;
-            });
-          },
-          decoration: InputDecoration(
-            hintText: 'e.g. 1500',
-            prefixText: '৳ ',
-            isDense: true,
-            filled: true,
-            fillColor: MtColors.surface,
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(10),
-              borderSide: const BorderSide(color: MtColors.line),
-            ),
-            enabledBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(10),
-              borderSide: const BorderSide(color: MtColors.line),
-            ),
-            focusedBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(10),
-              borderSide: const BorderSide(color: MtColors.brand, width: 1.5),
-            ),
-          ),
+          hintText: 'e.g. 2500',
+          onChanged: (parsed) => setState(() => _fee = parsed),
         ),
         const SizedBox(height: 12),
+
+        // Required advance deposit — the Phase-2 number. Only editable before
+        // the money lands: once a deposit is PAID, changing what was asked for
+        // would move the goalposts under a patient who already settled it, so
+        // the field disappears and the paid chip above states the fact.
+        if (_isDepositPhase) ...[
+          Text('Required Advance Deposit', style: MtTextStyles.labelMd),
+          const SizedBox(height: 6),
+          _AmountField(
+            controller: _depositController,
+            hintText: 'e.g. 500',
+            onChanged: (parsed) => setState(() => _depositInput = parsed),
+          ),
+          const SizedBox(height: 6),
+          Text(
+            'The patient pays this to confirm the visit. It is deducted from '
+            'their final bill.',
+            style: MtTextStyles.bodySm.copyWith(color: MtColors.ink3),
+          ),
+          const SizedBox(height: 12),
+        ],
 
         // Auto-computed invoice breakdown.
         Container(
@@ -599,14 +722,15 @@ class _TriageSlideOverState extends ConsumerState<TriageSlideOver> {
                 label: 'Total service fee',
                 value: '৳${_trimAmount(_fee ?? 0)}',
               ),
-              if (_hasDeposit) ...[
-                const SizedBox(height: 6),
-                _InvoiceLine(
-                  label: 'Deposit paid',
-                  value: '− ৳${_trimAmount(_deposit)}',
-                  valueColor: MtColors.completed,
-                ),
-              ],
+              const SizedBox(height: 6),
+              _InvoiceLine(
+                label: _hasDeposit ? 'Deposit paid' : 'Advance deposit',
+                value: _hasDeposit
+                    ? '− ৳${_trimAmount(_deposit)}'
+                    : '− ৳${_trimAmount(_depositInput ?? 0)}',
+                valueColor:
+                    _hasDeposit ? MtColors.completed : MtColors.ink,
+              ),
               const Padding(
                 padding: EdgeInsets.symmetric(vertical: 8),
                 child: Divider(color: MtColors.line, height: 1),
@@ -619,35 +743,39 @@ class _TriageSlideOverState extends ConsumerState<TriageSlideOver> {
             ],
           ),
         ),
-        const SizedBox(height: 20),
 
-        // Provider assignment selector.
-        Text('Assign On-Duty Provider', style: MtTextStyles.labelMd),
-        const SizedBox(height: 6),
-        _ProviderDropdown(
-          requestId: request.id,
-          value: _selectedProviderKey,
-          onChanged: _submitting
-              ? null
-              : (key) => setState(
-                  () => _selectedProviderKey = key ?? _assignLaterKey),
-        ),
-        const SizedBox(height: 8),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: TextButton.icon(
-            onPressed: _submitting ? null : widget.onAssignTeam,
-            style: TextButton.styleFrom(
-              foregroundColor: MtColors.brand,
-              padding: EdgeInsets.zero,
-              minimumSize: const Size(0, 32),
-              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-            ),
-            icon: const Icon(Icons.groups_2_outlined, size: 18),
-            label: Text('Open full match-maker (doctor + nurse)',
-                style: MtTextStyles.labelMd),
+        // Provider assignment — Phase 3 only. Hidden before the deposit clears
+        // because the backend refuses the dispatch, and offering an action
+        // that always fails is worse than not offering it.
+        if (!_isDepositPhase) ...[
+          const SizedBox(height: 20),
+          Text('Assign On-Duty Provider', style: MtTextStyles.labelMd),
+          const SizedBox(height: 6),
+          _ProviderDropdown(
+            requestId: request.id,
+            value: _selectedProviderKey,
+            onChanged: _submitting
+                ? null
+                : (key) => setState(
+                    () => _selectedProviderKey = key ?? _assignLaterKey),
           ),
-        ),
+          const SizedBox(height: 8),
+          Align(
+            alignment: Alignment.centerLeft,
+            child: TextButton.icon(
+              onPressed: _submitting ? null : widget.onAssignTeam,
+              style: TextButton.styleFrom(
+                foregroundColor: MtColors.brand,
+                padding: EdgeInsets.zero,
+                minimumSize: const Size(0, 32),
+                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+              ),
+              icon: const Icon(Icons.groups_2_outlined, size: 18),
+              label: Text('Open full match-maker (doctor + nurse)',
+                  style: MtTextStyles.labelMd),
+            ),
+          ),
+        ],
         const SizedBox(height: 8),
       ],
     );
@@ -658,6 +786,20 @@ class _TriageSlideOverState extends ConsumerState<TriageSlideOver> {
   Widget _buildFooter({required bool isPending, required bool canCancel}) {
     final assignLater = _selectedProviderKey == _assignLaterKey;
     final feeReady = _fee != null && _fee! > 0;
+    // Phase 2 needs BOTH numbers before it can ask the patient for anything.
+    final ready = _isDepositPhase
+        ? feeReady && _depositInput != null && _depositInput! > 0
+        : feeReady;
+    final label = _isDepositPhase
+        ? 'Set Fee & Request Deposit'
+        : assignLater
+            ? 'Update Fee (Assign Later)'
+            : 'Confirm Fee & Assign Doctor';
+    final icon = _isDepositPhase
+        ? Icons.request_quote_outlined
+        : assignLater
+            ? Icons.save_outlined
+            : Icons.send_rounded;
 
     return Container(
       padding: const EdgeInsets.all(24),
@@ -672,7 +814,7 @@ class _TriageSlideOverState extends ConsumerState<TriageSlideOver> {
             SizedBox(
               width: double.infinity,
               child: ElevatedButton.icon(
-                onPressed: (_submitting || !feeReady) ? null : _submit,
+                onPressed: (_submitting || !ready) ? null : _submit,
                 style: ElevatedButton.styleFrom(
                   backgroundColor: MtColors.brand,
                   foregroundColor: Colors.white,
@@ -691,18 +833,9 @@ class _TriageSlideOverState extends ConsumerState<TriageSlideOver> {
                               AlwaysStoppedAnimation<Color>(Colors.white),
                         ),
                       )
-                    : Icon(
-                        assignLater
-                            ? Icons.save_outlined
-                            : Icons.send_rounded,
-                        size: 18,
-                      ),
+                    : Icon(icon, size: 18),
                 label: Text(
-                  _submitting
-                      ? 'Processing…'
-                      : assignLater
-                          ? 'Save Fee (Assign Later)'
-                          : 'Confirm Fee & Assign Doctor',
+                  _submitting ? 'Processing…' : label,
                   style: MtTextStyles.labelLg.copyWith(color: Colors.white),
                 ),
               ),
@@ -754,6 +887,59 @@ class _TriageSlideOverState extends ConsumerState<TriageSlideOver> {
             ],
           ),
         ],
+      ),
+    );
+  }
+}
+
+/// A BDT amount input. Shared by the fee and deposit fields so the two cannot
+/// drift apart on formatting rules — both reject letters, both allow a single
+/// decimal point, and both report `null` for "not a usable amount" rather than
+/// leaving the caller to re-parse.
+class _AmountField extends StatelessWidget {
+  final TextEditingController controller;
+  final String hintText;
+  final ValueChanged<double?> onChanged;
+
+  const _AmountField({
+    required this.controller,
+    required this.hintText,
+    required this.onChanged,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return TextField(
+      controller: controller,
+      keyboardType: const TextInputType.numberWithOptions(decimal: true),
+      inputFormatters: [
+        FilteringTextInputFormatter.allow(RegExp(r'[0-9.]')),
+        TextInputFormatter.withFunction(
+          (oldV, newV) => newV.text.split('.').length > 2 ? oldV : newV,
+        ),
+      ],
+      onChanged: (raw) {
+        final parsed = double.tryParse(raw.trim());
+        onChanged((parsed == null || parsed <= 0) ? null : parsed);
+      },
+      decoration: InputDecoration(
+        hintText: hintText,
+        prefixText: '৳ ',
+        isDense: true,
+        filled: true,
+        fillColor: MtColors.surface,
+        border: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(10),
+          borderSide: const BorderSide(color: MtColors.line),
+        ),
+        enabledBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(10),
+          borderSide: const BorderSide(color: MtColors.line),
+        ),
+        focusedBorder: OutlineInputBorder(
+          borderRadius: BorderRadius.circular(10),
+          borderSide: const BorderSide(color: MtColors.brand, width: 1.5),
+        ),
       ),
     );
   }
@@ -935,9 +1121,15 @@ class _StatusBadge extends StatelessWidget {
         sColor = MtColors.brand;
         sBgColor = MtColors.brandSoft;
         break;
-      case 'deposit_paid_admin_reviewing':
+      case 'deposit_required':
+        // Amber — waiting on the PATIENT, not on us.
         sColor = const Color(0xFFB45309);
         sBgColor = const Color(0xFFFEF3C7);
+        break;
+      case 'deposit_paid_admin_reviewing':
+        // Indigo — the money is in and the ball is back in the admin's court.
+        sColor = const Color(0xFF4338CA);
+        sBgColor = const Color(0xFFE0E7FF);
         break;
       case 'approved':
         sColor = const Color(0xFF059669);
